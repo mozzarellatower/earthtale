@@ -8,21 +8,11 @@ Usage:
     python3 main.py grand_canyon --small         # Small 1x1 chunk test
     python3 main.py --help                       # Show help
 
-Options:
-    --small                     Generate a small 1x1 chunk world for testing
-    --scale <meters>            Meters per block (default: 5000)
-    --exaggeration <n>          Vertical exaggeration factor (default: 1.0)
-    --name <name>               World name
-    --seed <n>                  World seed
-    --skip-download             Skip SRTM download
-    --no-blue-marble            Disable Blue Marble imagery for biomes
-    --blue-marble-resolution    Blue Marble resolution (world_8km/world_4km/world_2km)
-    --ore-config <path>         Path to ore config JSON
-    --parallel                 Generate chunks in parallel
-    --workers <n>              Parallel worker count (defaults to all cores)
-    --resume                   Resume generation if output exists
+Examples:
+    python3 main.py --name "Earth" --min-lat -90 --max-lat 90 --min-lon -180 --max-lon 180 --scale 5000
 """
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Optional
@@ -150,80 +140,7 @@ def interactive_mode():
 
 def main():
     """Main entry point."""
-    args = sys.argv[1:]
-
-    # Check for help
-    if "--help" in args or "-h" in args:
-        print(__doc__)
-        print("Presets:", ", ".join(PRESET_LOCATIONS.keys()))
-        return
-
-    # Check for --small flag
-    small_mode = "--small" in args
-    if small_mode:
-        args = [a for a in args if a != "--small"]
-
-    # Check for preset argument
-    if args:
-        preset_key = args[0].lower().replace(" ", "_").replace("-", "_")
-        if preset_key in PRESET_LOCATIONS:
-            bounds = PRESET_LOCATIONS[preset_key]
-            name = preset_key.replace("_", " ").title()
-            scale = 5000.0
-            exaggeration = 1.0
-            seed = None
-            skip_download = False
-            use_blue_marble = True
-            blue_marble_resolution = "world_8km"
-            ore_config = None
-            parallel = False
-            workers = None
-            resume = False
-
-            # Parse optional args
-            i = 1
-            while i < len(args):
-                if args[i] == "--scale" and i + 1 < len(args):
-                    scale = float(args[i + 1])
-                    i += 2
-                elif args[i] == "--exaggeration" and i + 1 < len(args):
-                    exaggeration = float(args[i + 1])
-                    i += 2
-                elif args[i] == "--name" and i + 1 < len(args):
-                    name = args[i + 1]
-                    i += 2
-                elif args[i] == "--seed" and i + 1 < len(args):
-                    seed = int(args[i + 1])
-                    i += 2
-                elif args[i] == "--skip-download":
-                    skip_download = True
-                    i += 1
-                elif args[i] == "--no-blue-marble":
-                    use_blue_marble = False
-                    i += 1
-                elif args[i] == "--blue-marble-resolution" and i + 1 < len(args):
-                    blue_marble_resolution = args[i + 1]
-                    i += 2
-                elif args[i] == "--ore-config" and i + 1 < len(args):
-                    ore_config = args[i + 1]
-                    i += 2
-                elif args[i] == "--parallel":
-                    parallel = True
-                    i += 1
-                elif args[i] == "--workers" and i + 1 < len(args):
-                    workers = int(args[i + 1])
-                    i += 2
-                elif args[i] == "--resume":
-                    resume = True
-                    i += 1
-                else:
-                    i += 1
-        else:
-            print(f"Unknown preset: {args[0]}")
-            print("Available presets:", ", ".join(PRESET_LOCATIONS.keys()))
-            return
-    else:
-        # Interactive mode
+    if len(sys.argv) == 1:
         result = interactive_mode()
         if result is None:
             return
@@ -236,6 +153,77 @@ def main():
         parallel = False
         workers = None
         resume = False
+        small_mode = False
+    else:
+        parser = argparse.ArgumentParser(
+            description="Generate a Hytale world from NASA SRTM + Blue Marble data.",
+        )
+        parser.add_argument("preset", nargs="?", help="Preset name (optional)")
+        parser.add_argument("--min-lat", type=float, help="Minimum latitude")
+        parser.add_argument("--max-lat", type=float, help="Maximum latitude")
+        parser.add_argument("--min-lon", type=float, help="Minimum longitude")
+        parser.add_argument("--max-lon", type=float, help="Maximum longitude")
+        parser.add_argument("--scale", type=float, default=5000.0, help="Meters per block")
+        parser.add_argument("--exaggeration", type=float, default=1.0, help="Vertical exaggeration")
+        parser.add_argument("--name", help="World name")
+        parser.add_argument("--seed", type=int, help="World seed")
+        parser.add_argument("--skip-download", action="store_true", help="Skip SRTM download")
+        parser.add_argument("--no-blue-marble", dest="use_blue_marble", action="store_false")
+        parser.set_defaults(use_blue_marble=True)
+        parser.add_argument(
+            "--blue-marble-resolution",
+            default="world_8km",
+            help="Blue Marble resolution (world_8km/world_4km/world_2km)",
+        )
+        parser.add_argument("--ore-config", help="Path to ore config JSON")
+        parser.add_argument("--parallel", action="store_true", help="Generate chunks in parallel")
+        parser.add_argument(
+            "--workers",
+            type=int,
+            help="Parallel worker count (defaults to all cores)",
+        )
+        parser.add_argument("--resume", action="store_true", help="Resume generation if output exists")
+        parser.add_argument("--small", action="store_true", help="Generate a 1x1 chunk test world")
+        args = parser.parse_args()
+
+        bounds = None
+        preset_key = None
+        if args.preset:
+            preset_key = args.preset.lower().replace(" ", "_").replace("-", "_")
+            if preset_key not in PRESET_LOCATIONS:
+                print(f"Unknown preset: {args.preset}")
+                print("Available presets:", ", ".join(PRESET_LOCATIONS.keys()))
+                print("Or pass --min-lat/--max-lat/--min-lon/--max-lon for custom bounds.")
+                return
+            bounds = PRESET_LOCATIONS[preset_key]
+        else:
+            if all(
+                value is not None
+                for value in (args.min_lat, args.max_lat, args.min_lon, args.max_lon)
+            ):
+                bounds = {
+                    "min_lat": args.min_lat,
+                    "max_lat": args.max_lat,
+                    "min_lon": args.min_lon,
+                    "max_lon": args.max_lon,
+                }
+            else:
+                print("Available presets:", ", ".join(PRESET_LOCATIONS.keys()))
+                print("Or pass --min-lat/--max-lat/--min-lon/--max-lon for custom bounds.")
+                return
+
+        name = args.name or (preset_key.replace("_", " ").title() if preset_key else "Custom World")
+        scale = args.scale
+        exaggeration = args.exaggeration
+        seed = args.seed
+        skip_download = args.skip_download
+        use_blue_marble = args.use_blue_marble
+        blue_marble_resolution = args.blue_marble_resolution
+        ore_config = args.ore_config
+        parallel = args.parallel
+        workers = args.workers
+        resume = args.resume
+        small_mode = args.small
 
     print()
     max_chunks = 1 if small_mode else 0

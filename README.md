@@ -5,9 +5,12 @@ Convert NASA elevation and satellite data into playable Hytale world files.
 ## Features
 
 - **SRTM Elevation Data**: Downloads and processes NASA SRTM elevation data
+- **Blue Marble Surface Cues**: Uses NASA imagery colors for biome/surface hints
 - **Hytale World Format**: Generates valid Hytale world files with proper region/chunk structure
-- **Biome Classification**: Automatically assigns biomes based on elevation and latitude
+- **Biome Zoning**: Assigns biome zones based on elevation + imagery
+- **Ore Generation**: Configurable ore tiers (Copper, Iron, Thorium, Cobalt, Adamantite)
 - **Preset Locations**: Includes preset coordinates for famous landmarks
+- **Parallel + Resume**: Multi-core chunk generation with resume support
 - **Progress Tracking**: Real-time progress updates during conversion
 
 ## Installation
@@ -16,9 +19,6 @@ Convert NASA elevation and satellite data into playable Hytale world files.
 # Clone the repository
 git clone https://github.com/yourusername/earthtale.git
 cd earthtale
-
-# Install in development mode
-pip install -e .
 ```
 
 ## Quick Start
@@ -26,33 +26,47 @@ pip install -e .
 ### Convert a preset location
 
 ```bash
+# Install dependencies for main.py
+pip install zstandard httpx pillow
+
 # Convert the Grand Canyon
-earthtale preset "MyGrandCanyon" --preset grand_canyon
+python3 main.py grand_canyon
 
 # Convert Mount Everest with 2x vertical exaggeration
-earthtale preset "Everest" --preset mount_everest --exaggeration 2.0
+python3 main.py mount_everest --exaggeration 2.0
 ```
 
 ### Convert custom coordinates
 
 ```bash
 # Convert a specific region
-earthtale convert "GrandCanyon" \
+python3 main.py --name "GrandCanyon" \
   --min-lat 35.9 --max-lat 36.3 \
   --min-lon -112.3 --max-lon -111.8 \
   --scale 5000  # meters per block
 ```
 
-### View region information
+### Convert the whole Earth
 
 ```bash
-earthtale info --min-lat 35.9 --max-lat 36.3 --min-lon -112.3 --max-lon -111.8
+python3 main.py --name "Earth" \
+  --min-lat -90 --max-lat 90 \
+  --min-lon -180 --max-lon 180 \
+  --scale 5000 --parallel
+```
+
+### View region information
+
+Optional CLI tools (requires `pip install typer rich`):
+
+```bash
+PYTHONPATH=src python3 -m earthtale.cli info --min-lat 35.9 --max-lat 36.3 --min-lon -112.3 --max-lon -111.8
 ```
 
 ### List available presets
 
 ```bash
-earthtale list-presets
+PYTHONPATH=src python3 -m earthtale.cli list-presets
 ```
 
 ## Available Presets
@@ -64,43 +78,41 @@ earthtale list-presets
 | `alps_matterhorn` | Switzerland | Famous Alpine peak |
 | `death_valley` | California, USA | Lowest point in North America |
 | `hawaii_mauna_kea` | Hawaii, USA | Tallest mountain from base |
-| `iceland_eyjafjallajokull` | Iceland | Famous volcano |
+| `iceland` | Iceland | Famous volcano |
 
 ## CLI Options
 
-### `earthtale convert`
+### `python3 main.py`
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--min-lat` | Minimum latitude | Required |
-| `--max-lat` | Maximum latitude | Required |
-| `--min-lon` | Minimum longitude | Required |
-| `--max-lon` | Maximum longitude | Required |
-| `--scale, -s` | Meters per block | 5000.0 |
-| `--blue-marble/--no-blue-marble` | Use Blue Marble imagery for biome classification | Enabled |
+| `--min-lat` | Minimum latitude (custom bounds) | Required if no preset |
+| `--max-lat` | Maximum latitude (custom bounds) | Required if no preset |
+| `--min-lon` | Minimum longitude (custom bounds) | Required if no preset |
+| `--max-lon` | Maximum longitude (custom bounds) | Required if no preset |
+| `--scale` | Meters per block | 5000.0 |
+| `--exaggeration` | Vertical exaggeration | 1.0 |
+| `--name` | World name | Preset name or "Custom World" |
+| `--seed` | Random seed | None |
+| `--small` | Generate a 1x1 chunk test world | Disabled |
+| `--skip-download` | Skip SRTM download | Disabled |
+| `--no-blue-marble` | Disable Blue Marble imagery | Disabled |
 | `--blue-marble-resolution` | Blue Marble resolution (world_8km/world_4km/world_2km) | world_8km |
 | `--ore-config` | Path to ore configuration JSON | None |
-| `--parallel/--no-parallel` | Generate chunks in parallel | Disabled |
+| `--parallel` | Generate chunks in parallel | Disabled |
 | `--workers` | Parallel worker count (defaults to all cores) | None |
-| `--resume/--no-resume` | Resume generation if output exists | Disabled |
-| `--output, -o` | Output directory | `output` |
-| `--cache, -c` | Cache directory | `cache` |
-| `--exaggeration, -e` | Vertical exaggeration | 1.0 |
-| `--seed` | Random seed | None |
-| `--skip-download` | Skip SRTM download | False |
+| `--resume` | Resume generation if output exists | Disabled |
 
 ## Output Structure
 
 ```
 output/
-└── universe/
-    └── worlds/
-        └── {world_name}/
-            ├── config.json          # World configuration
-            ├── chunks/
-            │   └── {X}.{Z}.region.bin  # Region files
-            └── resources/
-                └── Time.json        # World time
+└── {world_name}/
+    ├── config.json          # World configuration
+    ├── chunks/
+    │   └── {X}.{Z}.region.bin  # Region files
+    └── resources/
+        └── Time.json        # World time
 ```
 
 ## Parallel Processing
@@ -109,7 +121,7 @@ Use `--parallel` to enable multi-core chunk generation. If you do not set `--wor
 
 Example:
 ```bash
-earthtale preset "GrandCanyon" --preset grand_canyon --parallel --workers 8
+python3 main.py grand_canyon --parallel --workers 8
 ```
 
 ## Resuming a Conversion
@@ -118,7 +130,7 @@ If a conversion is interrupted, rerun the same command with `--resume`. Existing
 
 Example:
 ```bash
-earthtale preset "GrandCanyon" --preset grand_canyon --resume
+python3 main.py grand_canyon --resume
 ```
 
 ## How It Works
@@ -127,7 +139,7 @@ earthtale preset "GrandCanyon" --preset grand_canyon --resume
 2. **Calculate Phase**: Determines world dimensions based on geographic bounds and scale
 3. **Generate Phase**: Creates terrain by:
    - Converting real-world elevation to Y coordinates
-   - Classifying biomes based on elevation and latitude
+   - Classifying biome zones using Blue Marble color + elevation
    - Generating block columns with appropriate surface/subsurface blocks
 4. **Save Phase**: Writes Hytale world files in the proper format
 
@@ -143,7 +155,7 @@ Use `--exaggeration` to make terrain more dramatic (e.g., `--exaggeration 2.0` d
 
 ## Biome Types
 
-Biomes are assigned based on elevation and latitude:
+Biomes are assigned based on Blue Marble colors, elevation, and latitude:
 
 - **Ocean**: Below sea level
 - **Beach**: Near sea level at coast
@@ -158,16 +170,22 @@ Biomes are assigned based on elevation and latitude:
 - **SRTM Elevation**: [NASA SRTM](https://www2.jpl.nasa.gov/srtm/)
 - **Blue Marble Imagery**: [NASA Blue Marble](https://visibleearth.nasa.gov/collection/1484/blue-marble)
 
+## Data Sizes (Approximate)
+
+- **SRTMGL1 tiles**: ~25MB uncompressed per 1x1 degree tile (smaller when zipped)
+- **Blue Marble**:
+  - `world_8km`: a few MB
+  - `world_4km`: tens of MB
+  - `world_2km`: larger still (use only if you need the extra detail)
+
 ## Requirements
 
 - Python 3.10+
-- numpy
-- rasterio (for GeoTIFF support)
-- pillow (for image processing)
-- httpx (for async downloads)
-- typer (CLI framework)
-- rich (progress display)
-- pymongo (BSON serialization)
+- zstandard
+- httpx
+- pillow
+- typer (optional, for `python3 -m earthtale.cli`)
+- rich (optional, for `python3 -m earthtale.cli`)
 
 ## License
 
