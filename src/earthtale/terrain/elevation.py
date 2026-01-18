@@ -74,12 +74,18 @@ def elevation_to_y(
             normalized = math.log1p(meters) / max_log
             return int(config.sea_level_y + normalized * above_sea_range)
     else:
-        # Linear scaling
-        total_range = config.max_elevation - config.min_elevation
-        y_range = config.max_y - config.min_y
-
-        normalized = (meters - config.min_elevation) / total_range
-        return int(config.min_y + normalized * y_range)
+        # Linear scaling with fixed sea level anchor.
+        if meters < 0:
+            below_range = 0 - config.min_elevation
+            if below_range <= 0:
+                return config.min_y
+            normalized = (meters - config.min_elevation) / below_range
+            return int(config.min_y + normalized * (config.sea_level_y - config.min_y))
+        above_range = config.max_elevation
+        if above_range <= 0:
+            return config.sea_level_y
+        normalized = meters / above_range
+        return int(config.sea_level_y + normalized * (config.max_y - config.sea_level_y))
 
 
 def y_to_elevation(
@@ -115,12 +121,15 @@ def y_to_elevation(
             normalized = (y - config.sea_level_y) / above_sea_range
             meters = math.expm1(normalized * max_log)
     else:
-        # Linear scaling
-        total_range = config.max_elevation - config.min_elevation
-        y_range = config.max_y - config.min_y
-
-        normalized = (y - config.min_y) / y_range
-        meters = config.min_elevation + normalized * total_range
+        # Linear scaling with fixed sea level anchor.
+        if y < config.sea_level_y:
+            below_range = config.sea_level_y - config.min_y
+            normalized = (y - config.min_y) / below_range if below_range else 0.0
+            meters = config.min_elevation + normalized * (0 - config.min_elevation)
+        else:
+            above_range = config.max_y - config.sea_level_y
+            normalized = (y - config.sea_level_y) / above_range if above_range else 0.0
+            meters = normalized * config.max_elevation
 
     # Undo vertical exaggeration
     if config.vertical_exaggeration != 1.0:

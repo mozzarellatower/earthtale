@@ -5,21 +5,27 @@ EarthTale - Generate a Hytale world from NASA elevation data.
 Usage:
     python3 main.py                              # Interactive mode
     python3 main.py grand_canyon                 # Use a preset
-    python3 main.py grand_canyon --small         # Small 4x4 chunk test
+    python3 main.py grand_canyon --small         # Small 1x1 chunk test
     python3 main.py --help                       # Show help
 
 Options:
-    --small              Generate a small 4x4 chunk world for testing
-    --scale <meters>     Meters per block (default: 30)
-    --exaggeration <n>   Vertical exaggeration factor (default: 1.0)
-    --name <name>        World name
+    --small                     Generate a small 1x1 chunk world for testing
+    --scale <meters>            Meters per block (default: 5000)
+    --exaggeration <n>          Vertical exaggeration factor (default: 1.0)
+    --name <name>               World name
+    --seed <n>                  World seed
+    --skip-download             Skip SRTM download
+    --no-blue-marble            Disable Blue Marble imagery for biomes
+    --blue-marble-resolution    Blue Marble resolution (world_8km/world_4km/world_2km)
+    --ore-config <path>         Path to ore config JSON
+    --parallel                 Generate chunks in parallel
+    --workers <n>              Parallel worker count (defaults to all cores)
+    --resume                   Resume generation if output exists
 """
 
 import sys
-import os
-import math
-import random
 from pathlib import Path
+from typing import Optional
 
 # Add src to path so we can import without installing
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -36,147 +42,50 @@ PRESET_LOCATIONS = {
 }
 
 
-def generate_world(name: str, bounds: dict, scale: float = 30.0,
-                   exaggeration: float = 1.0, output_dir: str = "output",
-                   max_chunks: int = 0):
-    """Generate a Hytale world from the given parameters.
+def run_conversion(
+    name: str,
+    bounds: dict,
+    scale: float = 5000.0,
+    exaggeration: float = 1.0,
+    output_dir: str = "output",
+    max_chunks: int = 0,
+    seed: Optional[int] = None,
+    skip_download: bool = False,
+    use_blue_marble: bool = True,
+    blue_marble_resolution: str = "world_8km",
+    ore_config: Optional[str] = None,
+    parallel: bool = False,
+    workers: Optional[int] = None,
+    resume: bool = False,
+):
+    """Generate a Hytale world using SRTM + Blue Marble data."""
+    from earthtale.config import ConversionConfig, BoundingBox
+    from earthtale.converter import ConversionPipeline
 
-    Args:
-        max_chunks: If > 0, limit world to max_chunks x max_chunks (for testing)
-    """
-
-    # Import Hytale modules (these have no external dependencies)
-    from earthtale.hytale.world import World, WorldConfig
-    from earthtale.hytale.chunk import Chunk
-    from earthtale.hytale.constants import CHUNK_SIZE, WORLD_HEIGHT
-    from earthtale.terrain.elevation import ElevationMapper, ElevationConfig
-    from earthtale.terrain.biome import BiomeClassifier, BiomeType
-    from earthtale.terrain.blocks import BlockColumnGenerator
-
-    print(f"Generating world: {name}")
-    print(f"  Bounds: ({bounds['min_lat']:.2f}, {bounds['min_lon']:.2f}) to ({bounds['max_lat']:.2f}, {bounds['max_lon']:.2f})")
-    print(f"  Scale: {scale} m/block")
-
-    # Calculate world size
-    EARTH_RADIUS = 6_371_000
-    lat_meters_per_degree = 2 * math.pi * EARTH_RADIUS / 360
-    center_lat = (bounds['min_lat'] + bounds['max_lat']) / 2
-    lon_meters_per_degree = lat_meters_per_degree * math.cos(math.radians(center_lat))
-
-    width_degrees = bounds['max_lon'] - bounds['min_lon']
-    height_degrees = bounds['max_lat'] - bounds['min_lat']
-
-    width_meters = width_degrees * lon_meters_per_degree
-    height_meters = height_degrees * lat_meters_per_degree
-
-    width_blocks = int(width_meters / scale)
-    height_blocks = int(height_meters / scale)
-
-    width_chunks = max(1, (width_blocks + CHUNK_SIZE - 1) // CHUNK_SIZE)
-    height_chunks = max(1, (height_blocks + CHUNK_SIZE - 1) // CHUNK_SIZE)
-
-    # Limit size if requested
-    if max_chunks > 0:
-        width_chunks = min(width_chunks, max_chunks)
-        height_chunks = min(height_chunks, max_chunks)
-        print(f"  World size: {width_chunks}x{height_chunks} chunks (limited for testing)")
-    else:
-        print(f"  World size: {width_chunks}x{height_chunks} chunks ({width_blocks}x{height_blocks} blocks)")
-
-    # Initialize mappers
-    elevation_config = ElevationConfig(
-        min_elevation=-500.0,
-        max_elevation=8849.0,
-        sea_level_y=64,
-        vertical_exaggeration=exaggeration,
+    bbox = BoundingBox(
+        min_lat=bounds["min_lat"],
+        max_lat=bounds["max_lat"],
+        min_lon=bounds["min_lon"],
+        max_lon=bounds["max_lon"],
     )
-    elevation_mapper = ElevationMapper(elevation_config)
-    biome_classifier = BiomeClassifier()
-    block_generator = BlockColumnGenerator()
-
-    # Create world with void generator (no terrain outside our chunks)
-    from earthtale.hytale.world import WorldGenConfig
-    world_gen = WorldGenConfig(type="Void", name="Void")
-    world = World(name, WorldConfig(
-        seed=random.randint(0, 2**32),
-        world_gen=world_gen,
-        save_new_chunks=False,  # Don't save empty chunks
-    ))
-
-    # Generate chunks
-    total_chunks = width_chunks * height_chunks
-    chunk_count = 0
-
-    print(f"\nGenerating {total_chunks} chunks...")
-
-    for chunk_z in range(height_chunks):
-        for chunk_x in range(width_chunks):
-            chunk = Chunk(chunk_x, chunk_z)
-
-            # Generate terrain for this chunk
-            for local_x in range(CHUNK_SIZE):
-                for local_z in range(CHUNK_SIZE):
-                    block_x = chunk_x * CHUNK_SIZE + local_x
-                    block_z = chunk_z * CHUNK_SIZE + local_z
-
-                    # Calculate lat/lon for this block
-                    lat_offset = (block_z * scale) / lat_meters_per_degree
-                    lon_offset = (block_x * scale) / lon_meters_per_degree
-                    lat = bounds['min_lat'] + lat_offset
-                    lon = bounds['min_lon'] + lon_offset
-
-                    # Generate procedural elevation (sine waves for demo)
-                    # In production, this would read from SRTM data
-                    base_elevation = 1000  # Base elevation in meters
-
-                    # Add some terrain variation
-                    freq1, freq2, freq3 = 0.01, 0.03, 0.07
-                    elevation = base_elevation
-                    elevation += 500 * math.sin(block_x * freq1) * math.cos(block_z * freq1)
-                    elevation += 200 * math.sin(block_x * freq2 + 1.5) * math.cos(block_z * freq2 + 0.7)
-                    elevation += 100 * math.sin(block_x * freq3 + 3.0) * math.cos(block_z * freq3 + 2.1)
-
-                    # Add some random variation
-                    elevation += random.uniform(-50, 50)
-
-                    # Map to Y coordinate
-                    surface_y = elevation_mapper.get_y(elevation * exaggeration)
-                    surface_y = max(1, min(WORLD_HEIGHT - 1, surface_y))
-
-                    # Get biome
-                    latitude_factor = biome_classifier.get_latitude_factor(lat)
-                    biome = biome_classifier.classify_from_elevation_only(surface_y, latitude_factor)
-
-                    # Generate block column
-                    column = block_generator.generate_column(
-                        x=block_x,
-                        z=block_z,
-                        surface_y=surface_y,
-                        biome=biome,
-                        seed=block_x * 31 + block_z
-                    )
-
-                    # Set blocks in chunk
-                    for y, block_id in enumerate(column.blocks):
-                        if y < WORLD_HEIGHT and block_id != 0:
-                            chunk.set_block(local_x, y, local_z, block_id)
-
-            world.add_chunk(chunk)
-            chunk_count += 1
-
-            # Progress
-            pct = 100 * chunk_count // total_chunks
-            print(f"\r  Progress: {pct}% ({chunk_count}/{total_chunks} chunks)", end="", flush=True)
-
-    print()
-
-    # Save world
-    print(f"\nSaving world...")
-    output_path = Path(output_dir)
-    world_path = world.save(output_path)
-
-    print(f"\nWorld saved to: {world_path}")
-    return world_path
+    config = ConversionConfig(
+        name=name,
+        bounds=bbox,
+        scale=scale,
+        output_dir=Path(output_dir),
+        vertical_exaggeration=exaggeration,
+        seed=seed,
+        skip_download=skip_download,
+        use_blue_marble=use_blue_marble,
+        blue_marble_resolution=blue_marble_resolution,
+        ore_config_path=Path(ore_config) if ore_config else None,
+        max_chunks=max_chunks or None,
+        parallel=parallel,
+        parallel_workers=workers,
+        resume=resume,
+    )
+    pipeline = ConversionPipeline(config)
+    return pipeline.run()
 
 
 def interactive_mode():
@@ -229,8 +138,8 @@ def interactive_mode():
     name = input(f"World name [{default_name}]: ").strip() or default_name
 
     # Get scale
-    scale_str = input("Scale (meters per block) [30]: ").strip()
-    scale = float(scale_str) if scale_str else 30.0
+    scale_str = input("Scale (meters per block) [5000]: ").strip()
+    scale = float(scale_str) if scale_str else 5000.0
 
     # Get exaggeration
     exag_str = input("Vertical exaggeration [1.0]: ").strip()
@@ -260,8 +169,16 @@ def main():
         if preset_key in PRESET_LOCATIONS:
             bounds = PRESET_LOCATIONS[preset_key]
             name = preset_key.replace("_", " ").title()
-            scale = 30.0
+            scale = 5000.0
             exaggeration = 1.0
+            seed = None
+            skip_download = False
+            use_blue_marble = True
+            blue_marble_resolution = "world_8km"
+            ore_config = None
+            parallel = False
+            workers = None
+            resume = False
 
             # Parse optional args
             i = 1
@@ -275,6 +192,30 @@ def main():
                 elif args[i] == "--name" and i + 1 < len(args):
                     name = args[i + 1]
                     i += 2
+                elif args[i] == "--seed" and i + 1 < len(args):
+                    seed = int(args[i + 1])
+                    i += 2
+                elif args[i] == "--skip-download":
+                    skip_download = True
+                    i += 1
+                elif args[i] == "--no-blue-marble":
+                    use_blue_marble = False
+                    i += 1
+                elif args[i] == "--blue-marble-resolution" and i + 1 < len(args):
+                    blue_marble_resolution = args[i + 1]
+                    i += 2
+                elif args[i] == "--ore-config" and i + 1 < len(args):
+                    ore_config = args[i + 1]
+                    i += 2
+                elif args[i] == "--parallel":
+                    parallel = True
+                    i += 1
+                elif args[i] == "--workers" and i + 1 < len(args):
+                    workers = int(args[i + 1])
+                    i += 2
+                elif args[i] == "--resume":
+                    resume = True
+                    i += 1
                 else:
                     i += 1
         else:
@@ -287,10 +228,32 @@ def main():
         if result is None:
             return
         name, bounds, scale, exaggeration = result
+        seed = None
+        skip_download = False
+        use_blue_marble = True
+        blue_marble_resolution = "world_8km"
+        ore_config = None
+        parallel = False
+        workers = None
+        resume = False
 
     print()
-    max_chunks = 4 if small_mode else 0
-    generate_world(name, bounds, scale, exaggeration, max_chunks=max_chunks)
+    max_chunks = 1 if small_mode else 0
+    run_conversion(
+        name,
+        bounds,
+        scale,
+        exaggeration,
+        max_chunks=max_chunks,
+        seed=seed,
+        skip_download=skip_download,
+        use_blue_marble=use_blue_marble,
+        blue_marble_resolution=blue_marble_resolution,
+        ore_config=ore_config,
+        parallel=parallel,
+        workers=workers,
+        resume=resume,
+    )
 
 
 if __name__ == "__main__":

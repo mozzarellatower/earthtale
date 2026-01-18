@@ -21,6 +21,11 @@ from .blocks import (
     ColumnConfig,
     generate_flat_world,
 )
+from .ores import (
+    OreConfig,
+    DEFAULT_ORE_CONFIGS,
+    load_ore_configs,
+)
 
 __all__ = [
     # Elevation
@@ -41,4 +46,8 @@ __all__ = [
     "BlockColumn",
     "ColumnConfig",
     "generate_flat_world",
+    # Ores
+    "OreConfig",
+    "DEFAULT_ORE_CONFIGS",
+    "load_ore_configs",
 ]

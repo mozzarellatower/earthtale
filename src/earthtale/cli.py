@@ -46,12 +46,18 @@ def convert(
     max_lat: float = typer.Option(..., "--max-lat", help="Maximum latitude"),
     min_lon: float = typer.Option(..., "--min-lon", help="Minimum longitude"),
     max_lon: float = typer.Option(..., "--max-lon", help="Maximum longitude"),
-    scale: float = typer.Option(30.0, "--scale", "-s", help="Meters per block"),
+    scale: float = typer.Option(5000.0, "--scale", "-s", help="Meters per block"),
     output: Path = typer.Option(Path("output"), "--output", "-o", help="Output directory"),
     cache: Path = typer.Option(Path("cache"), "--cache", "-c", help="Cache directory"),
     exaggeration: float = typer.Option(1.0, "--exaggeration", "-e", help="Vertical exaggeration"),
     seed: Optional[int] = typer.Option(None, "--seed", help="Random seed"),
     skip_download: bool = typer.Option(False, "--skip-download", help="Skip SRTM download"),
+    use_blue_marble: bool = typer.Option(True, "--blue-marble/--no-blue-marble", help="Use Blue Marble imagery for biomes"),
+    blue_marble_resolution: str = typer.Option("world_8km", "--blue-marble-resolution", help="Blue Marble resolution"),
+    ore_config: Optional[Path] = typer.Option(None, "--ore-config", help="Path to ore config JSON"),
+    parallel: bool = typer.Option(False, "--parallel/--no-parallel", help="Generate chunks in parallel"),
+    workers: Optional[int] = typer.Option(None, "--workers", help="Parallel worker count (defaults to all cores)"),
+    resume: bool = typer.Option(False, "--resume/--no-resume", help="Resume generation if output exists"),
 ):
     """Convert a geographic region to a Hytale world.
 
@@ -80,6 +86,12 @@ def convert(
         vertical_exaggeration=exaggeration,
         seed=seed,
         skip_download=skip_download,
+        use_blue_marble=use_blue_marble,
+        blue_marble_resolution=blue_marble_resolution,
+        ore_config_path=ore_config,
+        parallel=parallel,
+        parallel_workers=workers,
+        resume=resume,
     )
 
     console.print(f"[bold]Converting region to Hytale world: {name}[/bold]")
@@ -116,10 +128,16 @@ def convert(
 def preset(
     name: str = typer.Argument(..., help="Preset name or world name"),
     preset_name: Optional[str] = typer.Option(None, "--preset", "-p", help="Preset location name"),
-    scale: float = typer.Option(30.0, "--scale", "-s", help="Meters per block"),
+    scale: float = typer.Option(5000.0, "--scale", "-s", help="Meters per block"),
     output: Path = typer.Option(Path("output"), "--output", "-o", help="Output directory"),
     cache: Path = typer.Option(Path("cache"), "--cache", "-c", help="Cache directory"),
     exaggeration: float = typer.Option(1.0, "--exaggeration", "-e", help="Vertical exaggeration"),
+    use_blue_marble: bool = typer.Option(True, "--blue-marble/--no-blue-marble", help="Use Blue Marble imagery for biomes"),
+    blue_marble_resolution: str = typer.Option("world_8km", "--blue-marble-resolution", help="Blue Marble resolution"),
+    ore_config: Optional[Path] = typer.Option(None, "--ore-config", help="Path to ore config JSON"),
+    parallel: bool = typer.Option(False, "--parallel/--no-parallel", help="Generate chunks in parallel"),
+    workers: Optional[int] = typer.Option(None, "--workers", help="Parallel worker count (defaults to all cores)"),
+    resume: bool = typer.Option(False, "--resume/--no-resume", help="Resume generation if output exists"),
 ):
     """Convert a preset location to a Hytale world.
 
@@ -144,6 +162,12 @@ def preset(
         output_dir=output,
         cache_dir=cache,
         vertical_exaggeration=exaggeration,
+        use_blue_marble=use_blue_marble,
+        blue_marble_resolution=blue_marble_resolution,
+        ore_config_path=ore_config,
+        parallel=parallel,
+        parallel_workers=workers,
+        resume=resume,
     )
 
     console.print(f"[bold]Converting preset '{actual_preset}' to Hytale world: {name}[/bold]")
@@ -206,7 +230,7 @@ def info(
     max_lat: float = typer.Option(..., "--max-lat", help="Maximum latitude"),
     min_lon: float = typer.Option(..., "--min-lon", help="Minimum longitude"),
     max_lon: float = typer.Option(..., "--max-lon", help="Maximum longitude"),
-    scale: float = typer.Option(30.0, "--scale", "-s", help="Meters per block"),
+    scale: float = typer.Option(5000.0, "--scale", "-s", help="Meters per block"),
 ):
     """Show information about a region without converting.
 

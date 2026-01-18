@@ -5,8 +5,8 @@ Region files use the "HytaleIndexedStorage" format:
 - Version: 4 bytes (big-endian, value: 1)
 - Index count: 4 bytes (big-endian, value: 1024 = 32x32)
 - Segment size: 4 bytes (big-endian, value: 4096)
-- Index table: 1024 x 4-byte offsets (segment counts, big-endian)
-- Chunk data: Compressed chunks with 8-byte header + zstd data
+- Index table: 1024 x 4-byte segment start indices (1-based, big-endian)
+- Chunk data: Compressed chunks with 8-byte header + zstd data, aligned to segment size
 
 Each region file contains 32x32 chunks. Chunk position within a region
 is calculated as: (chunk_x % 32, chunk_z % 32)
@@ -20,7 +20,7 @@ Chunk data format:
 import struct
 import math
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Iterable
 
 try:
     import zstandard as zstd
@@ -93,7 +93,12 @@ class RegionWriter:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def write_region(self, region: Region, block_migration_version: int = 0) -> Path:
+    def write_region(
+        self,
+        region: Region,
+        block_migration_version: int = 0,
+        existing_raw: Optional[Dict[int, bytes]] = None,
+    ) -> Path:
         """Write a region to disk.
 
         Args:
@@ -113,6 +118,8 @@ class RegionWriter:
 
         # Serialize and compress all chunks
         chunk_data: Dict[int, bytes] = {}
+        if existing_raw:
+            chunk_data.update(existing_raw)
         for (local_x, local_z), chunk in region.chunks.items():
             idx = local_to_index(local_x, local_z)
             bson_data = chunk.to_bson(block_migration_version)
@@ -132,16 +139,15 @@ class RegionWriter:
 
             chunk_data[idx] = bytes(chunk_entry)
 
-        # Calculate the ALIGNED size for each chunk entry (padded to segment boundary)
-        # Index entry stores the aligned size so cumulative sum gives correct offset
-        chunk_sizes = [0] * INDEXED_STORAGE_INDEX_COUNT
-
+        # Index table stores the start segment index (1-based). 0 means no chunk.
+        chunk_offsets = [0] * INDEXED_STORAGE_INDEX_COUNT
+        segment_offset = 0
         for idx in range(INDEXED_STORAGE_INDEX_COUNT):
             if idx in chunk_data:
+                chunk_offsets[idx] = segment_offset + 1
                 data = chunk_data[idx]
-                # Store aligned size (multiple of 4096)
                 aligned_size = math.ceil(len(data) / INDEXED_STORAGE_SEGMENT_SIZE) * INDEXED_STORAGE_SEGMENT_SIZE
-                chunk_sizes[idx] = aligned_size
+                segment_offset += aligned_size // INDEXED_STORAGE_SEGMENT_SIZE
 
         # Build the file
         with open(filepath, "wb") as f:
@@ -157,9 +163,9 @@ class RegionWriter:
             # Segment size (big-endian)
             f.write(struct.pack(">I", INDEXED_STORAGE_SEGMENT_SIZE))
 
-            # Index table (big-endian chunk byte sizes)
-            for size in chunk_sizes:
-                f.write(struct.pack(">I", size))
+            # Index table (big-endian 1-based segment offsets)
+            for offset in chunk_offsets:
+                f.write(struct.pack(">I", offset))
 
             # Chunk data (in index order, padded to segment boundaries)
             for idx in range(INDEXED_STORAGE_INDEX_COUNT):
@@ -233,10 +239,66 @@ class RegionReader:
         return region
 
 
+def read_region_chunk_indexes(filepath: Path) -> Optional[set[int]]:
+    """Read the set of chunk indexes present in a region file."""
+    if not filepath.exists():
+        return None
+    with open(filepath, "rb") as f:
+        header = f.read(20)
+        if header != INDEXED_STORAGE_HEADER:
+            raise ValueError(f"Invalid header: {header}")
+        version = struct.unpack(">I", f.read(4))[0]
+        if version != INDEXED_STORAGE_VERSION:
+            raise ValueError(f"Unsupported version: {version}")
+        index_count = struct.unpack(">I", f.read(4))[0]
+        if index_count != INDEXED_STORAGE_INDEX_COUNT:
+            raise ValueError(f"Unexpected index count: {index_count}")
+        f.read(4)  # segment size
+        indexes = set()
+        for i in range(index_count):
+            entry = struct.unpack(">I", f.read(4))[0]
+            if entry:
+                indexes.add(i)
+    return indexes
+
+
+def read_region_chunks_raw(filepath: Path) -> Optional[Dict[int, bytes]]:
+    """Read raw chunk entries from a region file (compressed, with 8-byte header)."""
+    if not filepath.exists():
+        return None
+    with open(filepath, "rb") as f:
+        header = f.read(20)
+        if header != INDEXED_STORAGE_HEADER:
+            raise ValueError(f"Invalid header: {header}")
+        version = struct.unpack(">I", f.read(4))[0]
+        if version != INDEXED_STORAGE_VERSION:
+            raise ValueError(f"Unsupported version: {version}")
+        index_count = struct.unpack(">I", f.read(4))[0]
+        if index_count != INDEXED_STORAGE_INDEX_COUNT:
+            raise ValueError(f"Unexpected index count: {index_count}")
+        segment_size = struct.unpack(">I", f.read(4))[0]
+        index_entries = [struct.unpack(">I", f.read(4))[0] for _ in range(index_count)]
+        data_start = 20 + 4 + 4 + 4 + (index_count * 4)
+        raw = {}
+        data = f.read()
+        for idx, entry in enumerate(index_entries):
+            if not entry:
+                continue
+            start = (entry - 1) * segment_size
+            pos = data_start + start
+            if pos + 8 > data_start + len(data):
+                continue
+            compressed_size = struct.unpack(">I", data[pos + 4:pos + 8])[0]
+            length = 8 + compressed_size
+            raw[idx] = data[pos:pos + length]
+        return raw
+
+
 def write_regions(
     chunks: List[Chunk],
     output_dir: Path,
-    block_migration_version: int = 0
+    block_migration_version: int = 0,
+    existing_raw_by_region: Optional[Dict[Tuple[int, int], Dict[int, bytes]]] = None,
 ) -> List[Path]:
     """Write multiple chunks to region files.
 
@@ -263,7 +325,10 @@ def write_regions(
     written_files = []
 
     for region in regions.values():
-        filepath = writer.write_region(region, block_migration_version)
+        existing_raw = None
+        if existing_raw_by_region:
+            existing_raw = existing_raw_by_region.get((region.x, region.z))
+        filepath = writer.write_region(region, block_migration_version, existing_raw=existing_raw)
         written_files.append(filepath)
 
     return written_files

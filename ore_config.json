@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Copper",
+    "block_name": "Ore_Copper_Basalt",
+    "min_y": 20,
+    "max_y": 180,
+    "chance": 0.02,
+    "vein_min": 3,
+    "vein_max": 7
+  },
+  {
+    "name": "Iron",
+    "block_name": "Ore_Iron_Basalt",
+    "min_y": 0,
+    "max_y": 200,
+    "chance": 0.015,
+    "vein_min": 3,
+    "vein_max": 6
+  },
+  {
+    "name": "Thorium",
+    "block_name": "Ore_Thorium_Basalt",
+    "min_y": 0,
+    "max_y": 140,
+    "chance": 0.008,
+    "vein_min": 2,
+    "vein_max": 5
+  },
+  {
+    "name": "Cobalt",
+    "block_name": "Ore_Cobalt_Basalt",
+    "min_y": 0,
+    "max_y": 90,
+    "chance": 0.004,
+    "vein_min": 2,
+    "vein_max": 4
+  },
+  {
+    "name": "Adamantite",
+    "block_name": "Ore_Adamantite_Basalt",
+    "min_y": 0,
+    "max_y": 50,
+    "chance": 0.002,
+    "vein_min": 1,
+    "vein_max": 3
+  }
+]

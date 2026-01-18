@@ -60,7 +60,7 @@ class ConversionConfig:
     bounds: BoundingBox
 
     # Scale (meters per block)
-    scale: float = 30.0
+    scale: float = 5000.0
 
     # Output directory
     output_dir: Path = field(default_factory=lambda: Path("output"))
@@ -80,6 +80,17 @@ class ConversionConfig:
     # Processing options
     parallel_chunks: int = 4
     skip_download: bool = False
+    max_chunks: Optional[int] = None
+    parallel: bool = False
+    parallel_workers: Optional[int] = None
+    resume: bool = False
+
+    # Blue Marble imagery (optional, for biome classification)
+    use_blue_marble: bool = True
+    blue_marble_resolution: str = "world_8km"
+
+    # Ore generation config
+    ore_config_path: Optional[Path] = None
 
     # NASA credentials (optional)
     nasa_username: Optional[str] = None
@@ -94,6 +105,8 @@ class ConversionConfig:
             raise ValueError(f"sea_level_y must be 0-319: {self.sea_level_y}")
         if self.vertical_exaggeration <= 0:
             raise ValueError(f"vertical_exaggeration must be positive: {self.vertical_exaggeration}")
+        if self.parallel_workers is not None and self.parallel_workers <= 0:
+            raise ValueError(f"parallel_workers must be positive: {self.parallel_workers}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -114,6 +127,13 @@ class ConversionConfig:
             "vertical_exaggeration": self.vertical_exaggeration,
             "seed": self.seed,
             "parallel_chunks": self.parallel_chunks,
+            "max_chunks": self.max_chunks,
+            "parallel": self.parallel,
+            "parallel_workers": self.parallel_workers,
+            "resume": self.resume,
+            "use_blue_marble": self.use_blue_marble,
+            "blue_marble_resolution": self.blue_marble_resolution,
+            "ore_config_path": str(self.ore_config_path) if self.ore_config_path else None,
         }
 
     def save(self, filepath: Path) -> None:
@@ -137,7 +157,7 @@ class ConversionConfig:
         return cls(
             name=data["name"],
             bounds=bounds,
-            scale=data.get("scale", 30.0),
+            scale=data.get("scale", 5000.0),
             output_dir=Path(data.get("output_dir", "output")),
             cache_dir=Path(data.get("cache_dir", "cache")),
             min_elevation=data.get("min_elevation", -500.0),
@@ -146,6 +166,13 @@ class ConversionConfig:
             vertical_exaggeration=data.get("vertical_exaggeration", 1.0),
             seed=data.get("seed"),
             parallel_chunks=data.get("parallel_chunks", 4),
+            max_chunks=data.get("max_chunks"),
+            parallel=data.get("parallel", False),
+            parallel_workers=data.get("parallel_workers"),
+            resume=data.get("resume", False),
+            use_blue_marble=data.get("use_blue_marble", True),
+            blue_marble_resolution=data.get("blue_marble_resolution", "world_8km"),
+            ore_config_path=Path(data["ore_config_path"]) if data.get("ore_config_path") else None,
         )
 
 

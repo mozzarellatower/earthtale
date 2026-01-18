@@ -155,7 +155,12 @@ class World:
         """Get a chunk by coordinates."""
         return self.chunks.get((x, z))
 
-    def save(self, output_path: Path, block_migration_version: int = 0) -> Path:
+    def save(
+        self,
+        output_path: Path,
+        block_migration_version: int = 0,
+        existing_raw_by_region: Optional[Dict[tuple, Dict[int, bytes]]] = None,
+    ) -> Path:
         """Save the world to disk.
 
         Args:
@@ -193,7 +198,8 @@ class World:
             write_regions(
                 list(self.chunks.values()),
                 chunks_dir,
-                block_migration_version
+                block_migration_version,
+                existing_raw_by_region=existing_raw_by_region,
             )
 
         return world_dir

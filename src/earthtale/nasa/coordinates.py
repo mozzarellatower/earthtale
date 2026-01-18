@@ -138,7 +138,7 @@ def lat_lon_to_block(
     lon: float,
     origin_lat: float,
     origin_lon: float,
-    meters_per_block: float = 30.0
+    meters_per_block: float = 5000.0
 ) -> Tuple[int, int]:
     """Convert lat/lon to block coordinates relative to an origin.
 
@@ -147,7 +147,7 @@ def lat_lon_to_block(
         lon: Longitude in decimal degrees
         origin_lat: Origin latitude (usually min_lat of the region)
         origin_lon: Origin longitude (usually min_lon of the region)
-        meters_per_block: Scale factor (default 30m = 1 SRTM pixel)
+        meters_per_block: Scale factor (default 5000m)
 
     Returns:
         Tuple of (block_x, block_z) coordinates
@@ -180,7 +180,7 @@ def block_to_lat_lon(
     block_z: int,
     origin_lat: float,
     origin_lon: float,
-    meters_per_block: float = 30.0
+    meters_per_block: float = 5000.0
 ) -> Tuple[float, float]:
     """Convert block coordinates to lat/lon.
 

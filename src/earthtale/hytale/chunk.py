@@ -5,6 +5,7 @@ Chunks are stored in region files using BSON serialization.
 """
 
 import struct
+import base64
 from typing import List, Optional, Dict, Any
 
 from .constants import (
@@ -16,6 +17,26 @@ from .constants import (
     index_section,
 )
 from .section import BlockSection, create_section_from_column
+
+try:
+    from . import template_data as _template_data
+except Exception:
+    _template_data = None
+
+
+def _decode_template_data() -> Dict[str, Optional[bytes]]:
+    if _template_data is None:
+        return {"block": None, "env": None, "health": None}
+    try:
+        block = base64.b64decode(_template_data.BLOCK_CHUNK_DATA_B64.encode("ascii"))
+        env = base64.b64decode(_template_data.ENVIRONMENT_CHUNK_DATA_B64.encode("ascii"))
+        health = base64.b64decode(_template_data.BLOCK_HEALTH_DATA_B64.encode("ascii"))
+        return {"block": block, "env": env, "health": health}
+    except Exception:
+        return {"block": None, "env": None, "health": None}
+
+
+_TEMPLATE_DATA = _decode_template_data()
 
 
 def encode_bson_document(doc: Dict[str, Any]) -> bytes:
@@ -116,7 +137,7 @@ class Chunk:
         if not (0 <= x < CHUNK_SIZE and 0 <= z < CHUNK_SIZE):
             raise ValueError(f"Coordinates out of range: ({x}, {z})")
         for y, block_id in enumerate(blocks[:WORLD_HEIGHT]):
-            self.set_block(x, z, y, block_id)
+            self.set_block(x, y, z, block_id)
 
     def is_empty(self) -> bool:
         """Check if all sections are empty (air only)."""
@@ -153,20 +174,24 @@ class Chunk:
             }
             sections_list.append(section_doc)
 
-        # Build BlockChunk data (heightmap + tint)
-        # Format: Version (int) + heightmap (1024 shorts) + tints (1024 ints)
-        block_chunk_data = bytearray()
-        block_chunk_data.extend(struct.pack(">i", 3))  # Version 3
-        # Heightmap: 32x32 = 1024 shorts (set to 64 as default ground level)
-        for _ in range(1024):
-            block_chunk_data.extend(struct.pack(">h", 64))
-        # Tints: 32x32 = 1024 ints (default to 0)
-        for _ in range(1024):
-            block_chunk_data.extend(struct.pack(">i", 0))
+        block_chunk_data = _TEMPLATE_DATA["block"]
+        if block_chunk_data is None:
+            # Fallback: heightmap + tint layout (may not match server expectations).
+            block_chunk_data = bytearray()
+            block_chunk_data.extend(struct.pack(">i", 3))  # Version 3
+            for _ in range(1024):
+                block_chunk_data.extend(struct.pack(">h", 64))
+            for _ in range(1024):
+                block_chunk_data.extend(struct.pack(">i", 0))
+            block_chunk_data = bytes(block_chunk_data)
 
-        # Build EnvironmentChunk data (biome IDs)
-        # Simplified: just zeros for now
-        env_data = bytes(32 * 32 * 10)  # One byte per block column per section
+        env_data = _TEMPLATE_DATA["env"]
+        if env_data is None:
+            env_data = bytes(32 * 32 * 10)
+
+        block_health_data = _TEMPLATE_DATA["health"]
+        if block_health_data is None:
+            block_health_data = bytes(1)
 
         # Build the full Components document
         doc = {
@@ -174,7 +199,7 @@ class Chunk:
                 "WorldChunk": {},
                 "BlockChunk": {
                     "Version": 3,
-                    "Data": bytes(block_chunk_data)
+                    "Data": block_chunk_data
                 },
                 "ChunkColumn": {
                     "Sections": sections_list
@@ -189,7 +214,7 @@ class Chunk:
                     "BlockComponents": {}
                 },
                 "BlockHealthChunk": {
-                    "Data": bytes(1)  # Minimal data
+                    "Data": block_health_data
                 }
             }
         }

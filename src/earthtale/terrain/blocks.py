@@ -12,6 +12,7 @@ import random
 
 from .biome import BiomeType, get_surface_block, get_subsurface_block
 from ..hytale.blocks import BlockRegistry, get_default_registry, get_hytale_name
+from .ores import OreConfig, DEFAULT_ORE_CONFIGS
 
 
 @dataclass
@@ -30,6 +31,10 @@ class ColumnConfig:
     # Water
     water_level: int = 64  # Sea level Y coordinate
     fill_water: bool = True  # Fill below water level with water
+
+    # Ores
+    ore_enabled: bool = True
+    ore_configs: List[OreConfig] = field(default_factory=lambda: list(DEFAULT_ORE_CONFIGS))
 
 
 @dataclass
@@ -87,6 +92,11 @@ class BlockColumnGenerator:
             "Clay": self.registry.get_id(get_hytale_name("Clay")),
             "Bedrock": self.registry.get_id(get_hytale_name("Bedrock")),
         }
+
+        self._ore_block_ids = {}
+        if self.config.ore_enabled:
+            for ore in self.config.ore_configs:
+                self._ore_block_ids[ore.name] = self.registry.get_id(ore.block_name)
 
     def _get_block_id(self, name: str) -> int:
         """Get block ID from name, with caching."""
@@ -172,7 +182,47 @@ class BlockColumnGenerator:
 
             column.set_block(y, block)
 
+        if self.config.ore_enabled:
+            self._apply_ores(column, stone_block, gravel_block, seed)
+
         return column
+
+    def _hash_to_unit(self, x: int, y: int, z: int, seed: int, salt: int) -> float:
+        """Deterministic hash to [0, 1)."""
+        v = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791) ^ (seed * 2654435761) ^ (salt * 97531)
+        v &= 0xFFFFFFFF
+        v ^= (v >> 13)
+        v = (v * 1274126177) & 0xFFFFFFFF
+        v ^= (v >> 16)
+        return v / 0xFFFFFFFF
+
+    def _apply_ores(self, column: BlockColumn, stone_block: int, gravel_block: int, seed: Optional[int]) -> None:
+        """Replace stone blocks with ore blocks using a Minecraft-like distribution."""
+        base_seed = seed or 0
+        replace_ids = {stone_block, gravel_block}
+        for idx, ore in enumerate(self.config.ore_configs):
+            ore_block_id = self._ore_block_ids.get(ore.name, 0)
+            if ore_block_id == 0:
+                continue
+            min_y = max(0, ore.min_y)
+            max_y = min(len(column.blocks) - 1, ore.max_y)
+            if min_y > max_y:
+                continue
+            for y in range(min_y, max_y + 1):
+                if column.blocks[y] not in replace_ids:
+                    continue
+                chance = self._hash_to_unit(column.x, y, column.z, base_seed, idx)
+                if chance >= ore.chance:
+                    continue
+                size_roll = self._hash_to_unit(column.x, y, column.z, base_seed, idx + 101)
+                vein = ore.vein_min + int(size_roll * (ore.vein_max - ore.vein_min + 1))
+                offsets = [0]
+                for step in range(1, vein):
+                    offsets.append(step if step % 2 else -step)
+                for off in offsets:
+                    yy = y + off
+                    if 0 <= yy < len(column.blocks) and column.blocks[yy] in replace_ids:
+                        column.blocks[yy] = ore_block_id
 
     def generate_columns_for_chunk(
         self,

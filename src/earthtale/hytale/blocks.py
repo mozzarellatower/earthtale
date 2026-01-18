@@ -79,39 +79,46 @@ BLOCK_AIR = DEFAULT_REGISTRY.get_by_id(0)
 
 # Rock types (ID 1-3)
 BLOCK_STONE = DEFAULT_REGISTRY.register("Rock_Basalt")
-BLOCK_GRANITE = DEFAULT_REGISTRY.register("Rock_Granite")
-BLOCK_LIMESTONE = DEFAULT_REGISTRY.register("Rock_Limestone")
+BLOCK_GRANITE = DEFAULT_REGISTRY.register("Rock_Stone")
+BLOCK_LIMESTONE = DEFAULT_REGISTRY.register("Rock_Marble")
 
 # Dirt types (ID 4-5)
-BLOCK_DIRT = DEFAULT_REGISTRY.register("Dirt_Grassland")
-BLOCK_DIRT_DESERT = DEFAULT_REGISTRY.register("Dirt_Desert")
+BLOCK_DIRT = DEFAULT_REGISTRY.register("Soil_Dirt")
+BLOCK_DIRT_DESERT = DEFAULT_REGISTRY.register("Soil_Dirt_Burnt")
 
 # Surface blocks (ID 6-9)
-BLOCK_GRASS = DEFAULT_REGISTRY.register("Grass_Grassland")
-BLOCK_SAND = DEFAULT_REGISTRY.register("Sand_Beach")
-BLOCK_GRAVEL = DEFAULT_REGISTRY.register("Gravel_Basalt")
-BLOCK_SNOW = DEFAULT_REGISTRY.register("Snow_Fresh")
+BLOCK_GRASS = DEFAULT_REGISTRY.register("Soil_Grass")
+BLOCK_SAND = DEFAULT_REGISTRY.register("Soil_Gravel_Sand_White")
+BLOCK_GRAVEL = DEFAULT_REGISTRY.register("Soil_Gravel")
+BLOCK_SNOW = DEFAULT_REGISTRY.register("Soil_Snow")
 
 # Special blocks (ID 10-12)
-BLOCK_WATER = DEFAULT_REGISTRY.register("Water_Still", is_solid=False, is_transparent=True)
-BLOCK_ICE = DEFAULT_REGISTRY.register("Ice_Blue", is_transparent=True)
-BLOCK_BEDROCK = DEFAULT_REGISTRY.register("Bedrock_Volcanic")
+BLOCK_WATER = DEFAULT_REGISTRY.register("Fluid_Water", is_solid=False, is_transparent=True)
+BLOCK_ICE = DEFAULT_REGISTRY.register("Rock_Ice_Blue", is_transparent=True)
+BLOCK_BEDROCK = DEFAULT_REGISTRY.register("Rock_Bedrock")
+
+# Ores (Basalt variants align with default stone)
+BLOCK_ORE_COPPER = DEFAULT_REGISTRY.register("Ore_Copper_Basalt")
+BLOCK_ORE_IRON = DEFAULT_REGISTRY.register("Ore_Iron_Basalt")
+BLOCK_ORE_THORIUM = DEFAULT_REGISTRY.register("Ore_Thorium_Basalt")
+BLOCK_ORE_COBALT = DEFAULT_REGISTRY.register("Ore_Cobalt_Basalt")
+BLOCK_ORE_ADAMANTITE = DEFAULT_REGISTRY.register("Ore_Adamantite_Basalt")
 
 # Legacy name aliases for compatibility with terrain generator
 # Maps old names to new Hytale names
 LEGACY_NAME_MAP = {
     "Air": "Empty",
     "Stone": "Rock_Basalt",
-    "Dirt": "Dirt_Grassland",
-    "Grass": "Grass_Grassland",
-    "Sand": "Sand_Beach",
-    "Gravel": "Gravel_Basalt",
-    "Water": "Water_Still",
-    "Snow": "Snow_Fresh",
-    "Ice": "Ice_Blue",
-    "Sandstone": "Rock_Limestone",  # Approximate
-    "Clay": "Dirt_Grassland",  # Approximate
-    "Bedrock": "Bedrock_Volcanic",
+    "Dirt": "Soil_Dirt",
+    "Grass": "Soil_Grass",
+    "Sand": "Soil_Gravel_Sand_White",
+    "Gravel": "Soil_Gravel",
+    "Water": "Fluid_Water",
+    "Snow": "Soil_Snow",
+    "Ice": "Rock_Ice_Blue",
+    "Sandstone": "Rock_Marble",
+    "Clay": "Soil_Clay",
+    "Bedrock": "Rock_Bedrock",
 }
 
 

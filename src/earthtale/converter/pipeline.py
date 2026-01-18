@@ -2,13 +2,16 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Callable, Any
+from typing import Optional, List, Callable, Any, Dict, Tuple
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..config import ConversionConfig, BoundingBox
 from ..nasa import (
     SRTMCache,
     SRTMDownloader,
+    BlueMarbleDownloader,
     get_required_tiles,
     lat_lon_to_block,
     block_to_lat_lon,
@@ -22,6 +25,7 @@ from ..terrain import (
     BiomeType,
     BlockColumnGenerator,
     ColumnConfig,
+    load_ore_configs,
 )
 from ..hytale import (
     World,
@@ -30,6 +34,12 @@ from ..hytale import (
     CHUNK_SIZE,
     WORLD_HEIGHT,
 )
+from ..hytale.region import read_region_chunk_indexes, read_region_chunks_raw
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 @dataclass
@@ -73,6 +83,9 @@ class ConversionPipeline:
             password=self.config.nasa_password,
         )
         self._srtm_cache = SRTMCache(self.config.cache_dir / "srtm")
+        self._blue_marble_downloader = BlueMarbleDownloader(self.config.cache_dir / "blue_marble")
+        self._blue_marble_pixels = None
+        self._blue_marble_size = None
 
         # Initialize mappers
         self._elevation_mapper = ElevationMapper(ElevationConfig(
@@ -83,7 +96,49 @@ class ConversionPipeline:
         ))
 
         self._biome_classifier = BiomeClassifier()
-        self._block_generator = BlockColumnGenerator()
+        ore_configs = load_ore_configs(self.config.ore_config_path)
+        self._block_generator = BlockColumnGenerator(
+            config=ColumnConfig(ore_configs=ore_configs)
+        )
+
+    def _init_blue_marble(self, progress_callback: Optional[ProgressCallback] = None) -> None:
+        """Load Blue Marble imagery for biome classification."""
+        if not self.config.use_blue_marble or Image is None:
+            return
+        if progress_callback:
+            progress_callback(ConversionProgress("blue_marble", 0, 1, "Loading Blue Marble imagery..."))
+        path = None
+        if not self.config.skip_download:
+            import asyncio
+            path = asyncio.run(
+                self._blue_marble_downloader.download_image(
+                    resolution=self.config.blue_marble_resolution
+                )
+            )
+        if path is None:
+            filename = f"blue_marble_{self.config.blue_marble_resolution}.jpg"
+            candidate = self._blue_marble_downloader.cache_dir / filename
+            if candidate.exists():
+                path = candidate
+        if path is None:
+            return
+        image = Image.open(path).convert("RGB")
+        self._blue_marble_pixels = image.load()
+        self._blue_marble_size = image.size
+        if progress_callback:
+            progress_callback(ConversionProgress("blue_marble", 1, 1, "Blue Marble imagery ready"))
+
+    def _get_color_at_lat_lon(self, lat: float, lon: float) -> Optional[tuple[int, int, int]]:
+        """Sample Blue Marble image for a lat/lon."""
+        if self._blue_marble_pixels is None or self._blue_marble_size is None:
+            return None
+        width, height = self._blue_marble_size
+        x = int(((lon + 180.0) / 360.0) * (width - 1))
+        y = int(((90.0 - lat) / 180.0) * (height - 1))
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+        r, g, b = self._blue_marble_pixels[x, y]
+        return (int(r), int(g), int(b))
 
     def _calculate_world_size(self) -> tuple[int, int, int, int]:
         """Calculate world size in blocks and chunks.
@@ -108,6 +163,11 @@ class ConversionPipeline:
         # Convert to chunks
         width_chunks = (width_blocks + CHUNK_SIZE - 1) // CHUNK_SIZE
         height_chunks = (height_blocks + CHUNK_SIZE - 1) // CHUNK_SIZE
+        if self.config.max_chunks:
+            width_chunks = min(width_chunks, self.config.max_chunks)
+            height_chunks = min(height_chunks, self.config.max_chunks)
+            width_blocks = width_chunks * CHUNK_SIZE
+            height_blocks = height_chunks * CHUNK_SIZE
 
         return (width_blocks, height_blocks, width_chunks, height_chunks)
 
@@ -181,11 +241,16 @@ class ConversionPipeline:
                     self.config.scale
                 )
                 latitude_factor = self._biome_classifier.get_latitude_factor(lat)
-
-                # Classify biome (elevation-only mode)
-                biome = self._biome_classifier.classify_from_elevation_only(
-                    surface_y, latitude_factor
-                )
+                color = self._get_color_at_lat_lon(lat, lon)
+                if color is None:
+                    biome = self._biome_classifier.classify_from_elevation_only(
+                        surface_y, latitude_factor
+                    )
+                else:
+                    r, g, b = color
+                    biome = self._biome_classifier.classify(
+                        r, g, b, surface_y, latitude_factor
+                    )
 
                 # Generate block column
                 column = self._block_generator.generate_column(
@@ -202,6 +267,27 @@ class ConversionPipeline:
                         chunk.set_block(local_x, y, local_z, block_id)
 
         return chunk
+
+    def _load_existing_indexes(
+        self,
+        chunks_dir: Path,
+        width_chunks: int,
+        height_chunks: int,
+    ) -> Dict[Tuple[int, int], set[int]]:
+        """Load existing chunk indexes per region for resume."""
+        existing = {}
+        for chunk_z in range(height_chunks):
+            for chunk_x in range(width_chunks):
+                region_x = chunk_x >> 5
+                region_z = chunk_z >> 5
+                key = (region_x, region_z)
+                if key in existing:
+                    continue
+                path = chunks_dir / f"{region_x}.{region_z}.region.bin"
+                indexes = read_region_chunk_indexes(path)
+                if indexes:
+                    existing[key] = indexes
+        return existing
 
     def run(
         self,
@@ -231,13 +317,18 @@ class ConversionPipeline:
 
         if missing_tiles and not self.config.skip_download:
             report_progress("download", 0, len(missing_tiles), f"Downloading {len(missing_tiles)} tiles...")
-            # Note: In practice, would use async download here
-            for i, tile in enumerate(missing_tiles):
-                report_progress("download", i, len(missing_tiles), f"Downloading {tile}...")
-                # self._downloader.download_tile(tile)  # Would be async
+            self._downloader.download_region(
+                self.config.bounds.min_lat,
+                self.config.bounds.max_lat,
+                self.config.bounds.min_lon,
+                self.config.bounds.max_lon,
+            )
             report_progress("download", len(missing_tiles), len(missing_tiles), "Download complete")
         else:
             report_progress("download", 1, 1, f"All {len(required_tiles)} tiles available")
+
+        # Phase 1b: Load Blue Marble imagery (optional)
+        self._init_blue_marble(progress_callback)
 
         # Phase 2: Calculate world dimensions
         report_progress("calculate", 0, 1, "Calculating world dimensions...")
@@ -256,9 +347,36 @@ class ConversionPipeline:
         # Phase 4: Generate chunks
         report_progress("generate", 0, total_chunks, "Generating terrain...")
         chunk_count = 0
+        chunks_dir = (self.config.output_dir / self.config.name / "chunks")
+        existing_indexes = {}
+        if self.config.resume:
+            existing_indexes = self._load_existing_indexes(chunks_dir, width_chunks, height_chunks)
 
+        chunk_coords = []
         for chunk_z in range(height_chunks):
             for chunk_x in range(width_chunks):
+                if self.config.resume:
+                    region_key = (chunk_x >> 5, chunk_z >> 5)
+                    idx = (chunk_z & 0x1F) * 32 + (chunk_x & 0x1F)
+                    if idx in existing_indexes.get(region_key, set()):
+                        chunk_count += 1
+                        report_progress("generate", chunk_count, total_chunks,
+                                      f"Chunk ({chunk_x}, {chunk_z}) [skipped]")
+                        continue
+                chunk_coords.append((chunk_x, chunk_z))
+
+        if self.config.parallel:
+            workers = self.config.parallel_workers or os.cpu_count() or 1
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(self._generate_chunk, x, z): (x, z) for x, z in chunk_coords}
+                for future in as_completed(futures):
+                    x, z = futures[future]
+                    chunk = future.result()
+                    world.add_chunk(chunk)
+                    chunk_count += 1
+                    report_progress("generate", chunk_count, total_chunks, f"Chunk ({x}, {z})")
+        else:
+            for chunk_x, chunk_z in chunk_coords:
                 chunk = self._generate_chunk(chunk_x, chunk_z)
                 world.add_chunk(chunk)
                 chunk_count += 1
@@ -267,7 +385,15 @@ class ConversionPipeline:
 
         # Phase 5: Save world
         report_progress("save", 0, 1, "Saving world files...")
-        world_path = world.save(self.config.output_dir)
+        existing_raw_by_region = None
+        if self.config.resume and chunks_dir.exists():
+            existing_raw_by_region = {}
+            for region_key in {((x >> 5), (z >> 5)) for x, z in chunk_coords}:
+                path = chunks_dir / f"{region_key[0]}.{region_key[1]}.region.bin"
+                raw = read_region_chunks_raw(path)
+                if raw:
+                    existing_raw_by_region[region_key] = raw
+        world_path = world.save(self.config.output_dir, existing_raw_by_region=existing_raw_by_region)
         report_progress("save", 1, 1, f"World saved to {world_path}")
 
         return world_path
@@ -277,7 +403,7 @@ def convert_region(
     name: str,
     bounds: BoundingBox,
     output_dir: Path,
-    scale: float = 30.0,
+    scale: float = 5000.0,
     cache_dir: Optional[Path] = None,
     progress_callback: Optional[ProgressCallback] = None,
     **kwargs
