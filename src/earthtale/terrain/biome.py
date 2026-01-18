@@ -138,10 +138,25 @@ class BiomeClassifier:
                 if elevation_y < 70:  # Near sea level
                     return BiomeType.BEACH
                 return BiomeType.DESERT
+        # Drylands (brown/orange, low green dominance)
+        green_ratio = g / max(1.0, (r + g + b))
+        if 10 <= hsv.h <= 90 and hsv.s > 0.15 and hsv.v > 0.25:
+            if green_ratio < 0.38:
+                return BiomeType.DESERT
+        if r >= g >= b and (r - g) > 5 and (g - b) > 5 and green_ratio < 0.40:
+            return BiomeType.DESERT
+
+        # Semi-arid drylands hiding in greenish hues
+        if 50 < hsv.h < 140:
+            if hsv.s < 0.35 and hsv.v > 0.35:
+                if latitude_factor < self.config.hot_threshold + 0.1:
+                    return BiomeType.DESERT
+            if green_ratio < 0.35:
+                return BiomeType.DESERT
 
         # Green vegetation
         if 60 < hsv.h < 180:  # Green range
-            if hsv.s > 0.2:  # Saturated green
+            if hsv.s > 0.3 and green_ratio >= 0.4:  # Strong green
                 # Temperature determines type
                 if latitude_factor > self.config.cold_threshold:
                     if elevation_y > 150:

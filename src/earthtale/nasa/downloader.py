@@ -18,6 +18,7 @@ from typing import Optional, List, Callable
 from urllib.parse import urljoin
 import hashlib
 import json
+import gzip
 
 import httpx
 
@@ -49,7 +50,7 @@ class SRTMDownloader:
 
     # SRTM data URL patterns
     USGS_SRTM_BASE = "https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/"
-    CGIAR_SRTM_BASE = "https://srtm.csi.cgiar.org/wp-content/uploads/files/srtm_5x5/TIFF/"
+    PUBLIC_SRTM_BASE = "https://elevation-tiles-prod.s3.amazonaws.com/skadi/"
 
     def __init__(
         self,
@@ -108,6 +109,17 @@ class SRTMDownloader:
         """
         return self.get_cached_path(tile_name) is not None
 
+    def is_tile_available(self, tile_name: str) -> bool:
+        """Check if a tile is available or marked unavailable.
+
+        Returns:
+            True if the tile exists on disk or is known-unavailable.
+        """
+        if self.is_tile_cached(tile_name):
+            return True
+        entry = self._metadata.get("downloads", {}).get(tile_name, {})
+        return bool(entry.get("missing"))
+
     def get_missing_tiles(
         self,
         min_lat: float,
@@ -127,7 +139,7 @@ class SRTMDownloader:
             List of tile names that need to be downloaded
         """
         required = get_required_tiles(min_lat, max_lat, min_lon, max_lon)
-        return [t for t in required if not self.is_tile_cached(t)]
+        return [t for t in required if not self.is_tile_available(t)]
 
     async def download_tile(
         self,
@@ -147,76 +159,120 @@ class SRTMDownloader:
         cached = self.get_cached_path(tile_name)
         if cached:
             return cached
+        if self.is_tile_available(tile_name):
+            return None
 
-        # Construct URL
-        url = urljoin(self.USGS_SRTM_BASE, f"{tile_name}.SRTMGL1.hgt.zip")
         filepath = self.cache_dir / f"{tile_name}.hgt"
+        gz_filepath = self.cache_dir / f"{tile_name}.hgt.gz"
         zip_filepath = self.cache_dir / f"{tile_name}.hgt.zip"
 
-        progress = DownloadProgress(
-            url=url,
-            filename=tile_name,
-            total_bytes=0,
-            downloaded_bytes=0
-        )
-
-        try:
-            # Configure authentication if provided
-            auth = None
-            if self.username and self.password:
-                auth = httpx.BasicAuth(self.username, self.password)
-
-            async with httpx.AsyncClient(auth=auth, follow_redirects=True) as client:
-                # Make request
-                async with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        progress.error = f"HTTP {response.status_code}"
-                        if progress_callback:
-                            progress_callback(progress)
-                        return None
-
-                    # Get total size
-                    total_size = int(response.headers.get("content-length", 0))
-                    progress.total_bytes = total_size
-
-                    # Download with progress
-                    with open(zip_filepath, "wb") as f:
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            f.write(chunk)
-                            progress.downloaded_bytes += len(chunk)
-                            if progress_callback:
-                                progress_callback(progress)
-
-                # Extract the .hgt file from zip
-                import zipfile
-                with zipfile.ZipFile(zip_filepath) as zf:
-                    # Find the .hgt file
-                    hgt_files = [n for n in zf.namelist() if n.endswith('.hgt')]
-                    if hgt_files:
-                        with zf.open(hgt_files[0]) as src, open(filepath, 'wb') as dst:
-                            dst.write(src.read())
-
-                # Clean up zip
-                zip_filepath.unlink(missing_ok=True)
-
+        async def download_gzip(url: str) -> tuple[bool, Optional[str], bool]:
+            progress = DownloadProgress(url=url, filename=tile_name, total_bytes=0, downloaded_bytes=0)
+            try:
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    async with client.stream("GET", url) as response:
+                        if response.status_code != 200:
+                            return False, f"HTTP {response.status_code}", response.status_code == 404
+                        progress.total_bytes = int(response.headers.get("content-length", 0))
+                        with open(gz_filepath, "wb") as f:
+                            async for chunk in response.aiter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                                progress.downloaded_bytes += len(chunk)
+                                if progress_callback:
+                                    progress_callback(progress)
+                with gzip.open(gz_filepath, "rb") as src, open(filepath, "wb") as dst:
+                    dst.write(src.read())
+                gz_filepath.unlink(missing_ok=True)
                 progress.complete = True
                 if progress_callback:
                     progress_callback(progress)
-
-                # Update metadata
                 self._metadata["downloads"][tile_name] = {
                     "url": url,
                     "size": filepath.stat().st_size if filepath.exists() else 0
                 }
                 self._save_metadata()
+                return True, None, False
+            except Exception as exc:
+                return False, str(exc), False
 
-                return filepath
+        async def download_zip(url: str) -> tuple[bool, Optional[str]]:
+            progress = DownloadProgress(url=url, filename=tile_name, total_bytes=0, downloaded_bytes=0)
+            try:
+                auth = None
+                if self.username and self.password:
+                    auth = httpx.BasicAuth(self.username, self.password)
+                async with httpx.AsyncClient(auth=auth, follow_redirects=True) as client:
+                    async with client.stream("GET", url) as response:
+                        if response.status_code != 200:
+                            return False, f"HTTP {response.status_code}"
+                        progress.total_bytes = int(response.headers.get("content-length", 0))
+                        with open(zip_filepath, "wb") as f:
+                            async for chunk in response.aiter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                                progress.downloaded_bytes += len(chunk)
+                                if progress_callback:
+                                    progress_callback(progress)
+                import zipfile
+                with zipfile.ZipFile(zip_filepath) as zf:
+                    hgt_files = [n for n in zf.namelist() if n.endswith(".hgt")]
+                    if hgt_files:
+                        with zf.open(hgt_files[0]) as src, open(filepath, "wb") as dst:
+                            dst.write(src.read())
+                zip_filepath.unlink(missing_ok=True)
+                progress.complete = True
+                if progress_callback:
+                    progress_callback(progress)
+                self._metadata["downloads"][tile_name] = {
+                    "url": url,
+                    "size": filepath.stat().st_size if filepath.exists() else 0
+                }
+                self._save_metadata()
+                return True, None
+            except Exception as exc:
+                return False, str(exc)
 
-        except Exception as e:
-            progress.error = str(e)
+        # Try public mirror first (no auth required)
+        public_url = urljoin(self.PUBLIC_SRTM_BASE, f"{tile_name[:3]}/{tile_name}.hgt.gz")
+        ok, err, unavailable = await download_gzip(public_url)
+        if ok:
+            return filepath
+        if unavailable:
+            self._metadata.setdefault("downloads", {})[tile_name] = {
+                "url": public_url,
+                "size": 0,
+                "missing": True,
+            }
+            self._save_metadata()
+            progress = DownloadProgress(
+                url=public_url,
+                filename=tile_name,
+                total_bytes=0,
+                downloaded_bytes=0,
+                complete=False,
+                error="HTTP 404 (missing tile)",
+            )
             if progress_callback:
                 progress_callback(progress)
             return None
+
+        # Fall back to NASA Earthdata if credentials provided
+        if self.username and self.password:
+            nasa_url = urljoin(self.USGS_SRTM_BASE, f"{tile_name}.SRTMGL1.hgt.zip")
+            ok, err = await download_zip(nasa_url)
+            if ok:
+                return filepath
+
+        progress = DownloadProgress(
+            url=public_url,
+            filename=tile_name,
+            total_bytes=0,
+            downloaded_bytes=0,
+            complete=False,
+            error=err or "Download failed",
+        )
+        if progress_callback:
+            progress_callback(progress)
+        return None
 
     async def download_tiles(
         self,
@@ -288,13 +344,22 @@ class SRTMDownloader:
 
 
 class BlueMarbleDownloader:
-    """Downloads Blue Marble satellite imagery from NASA."""
+    """Downloads Blue Marble satellite imagery."""
 
-    # Blue Marble URLs (2004 versions, various resolutions)
+    # Blue Marble URLs (fallback list per resolution)
     BLUE_MARBLE_URLS = {
-        "world_8km": "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x5400x2700.jpg",
-        "world_4km": "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x10800x5400.jpg",
-        "world_2km": "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x21600x10800.jpg",
+        "world_8km": [
+            "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x5400x2700.jpg",
+            "https://upload.wikimedia.org/wikipedia/commons/5/56/Blue_Marble_Next_Generation_%2B_topography_%2B_bathymetry.jpg",
+        ],
+        "world_4km": [
+            "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x10800x5400.jpg",
+            "https://upload.wikimedia.org/wikipedia/commons/5/56/Blue_Marble_Next_Generation_%2B_topography_%2B_bathymetry.jpg",
+        ],
+        "world_2km": [
+            "https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73776/world.200408.3x21600x10800.jpg",
+            "https://upload.wikimedia.org/wikipedia/commons/5/56/Blue_Marble_Next_Generation_%2B_topography_%2B_bathymetry.jpg",
+        ],
     }
 
     def __init__(self, cache_dir: Path):
@@ -323,7 +388,6 @@ class BlueMarbleDownloader:
         if resolution not in self.BLUE_MARBLE_URLS:
             raise ValueError(f"Unknown resolution: {resolution}")
 
-        url = self.BLUE_MARBLE_URLS[resolution]
         filename = f"blue_marble_{resolution}.jpg"
         filepath = self.cache_dir / filename
 
@@ -331,40 +395,43 @@ class BlueMarbleDownloader:
         if filepath.exists():
             return filepath
 
-        progress = DownloadProgress(
-            url=url,
-            filename=filename,
-            total_bytes=0,
-            downloaded_bytes=0
-        )
-
-        try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                async with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        progress.error = f"HTTP {response.status_code}"
-                        if progress_callback:
-                            progress_callback(progress)
-                        return None
-
-                    total_size = int(response.headers.get("content-length", 0))
-                    progress.total_bytes = total_size
-
-                    with open(filepath, "wb") as f:
-                        async for chunk in response.aiter_bytes(chunk_size=8192):
-                            f.write(chunk)
-                            progress.downloaded_bytes += len(chunk)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        urls = self.BLUE_MARBLE_URLS[resolution]
+        for url in urls:
+            progress = DownloadProgress(
+                url=url,
+                filename=filename,
+                total_bytes=0,
+                downloaded_bytes=0
+            )
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
+                    async with client.stream("GET", url) as response:
+                        if response.status_code != 200:
+                            progress.error = f"HTTP {response.status_code}"
                             if progress_callback:
                                 progress_callback(progress)
+                            continue
 
-            progress.complete = True
-            if progress_callback:
-                progress_callback(progress)
+                        total_size = int(response.headers.get("content-length", 0))
+                        progress.total_bytes = total_size
 
-            return filepath
+                        with open(filepath, "wb") as f:
+                            async for chunk in response.aiter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                                progress.downloaded_bytes += len(chunk)
+                                if progress_callback:
+                                    progress_callback(progress)
 
-        except Exception as e:
-            progress.error = str(e)
-            if progress_callback:
-                progress_callback(progress)
-            return None
+                progress.complete = True
+                if progress_callback:
+                    progress_callback(progress)
+
+                return filepath
+            except Exception as e:
+                progress.error = str(e)
+                if progress_callback:
+                    progress_callback(progress)
+                continue
+
+        return None

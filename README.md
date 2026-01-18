@@ -36,6 +36,21 @@ python3 main.py grand_canyon
 python3 main.py mount_everest --exaggeration 2.0
 ```
 
+## NASA Earthdata Credentials
+
+By default, EarthTale uses a public SRTM mirror (no auth required). Some ocean/polar tiles simply do not exist in SRTM; those are treated as missing and will generate sea-level terrain. If a tile isn't available on the public mirror, you can provide NASA Earthdata credentials as a fallback:
+
+```bash
+python3 main.py grand_canyon --nasa-user YOUR_USER --nasa-pass YOUR_PASS
+```
+
+Or:
+```bash
+export EARTHDATA_USER=YOUR_USER
+export EARTHDATA_PASS=YOUR_PASS
+python3 main.py grand_canyon
+```
+
 ### Convert custom coordinates
 
 ```bash
@@ -102,6 +117,10 @@ PYTHONPATH=src python3 -m earthtale.cli list-presets
 | `--parallel` | Generate chunks in parallel | Disabled |
 | `--workers` | Parallel worker count (defaults to all cores) | None |
 | `--resume` | Resume generation if output exists | Disabled |
+| `--nasa-user` | NASA Earthdata username (or `EARTHDATA_USER`) | None |
+| `--nasa-pass` | NASA Earthdata password (or `EARTHDATA_PASS`) | None |
+| `--download-cache-mb` | Pause SRTM downloads when cache reaches this size | None |
+| `--autosave-every` | Autosave every N chunks (0 disables) | 25 |
 
 ## Output Structure
 
@@ -127,6 +146,7 @@ python3 main.py grand_canyon --parallel --workers 8
 ## Resuming a Conversion
 
 If a conversion is interrupted, rerun the same command with `--resume`. Existing chunks already written to region files are preserved and skipped.
+Autosaves happen every 25 chunks by default, and a Ctrl+C will save a partial world before exiting.
 
 Example:
 ```bash
@@ -168,6 +188,7 @@ Biomes are assigned based on Blue Marble colors, elevation, and latitude:
 ## Data Sources
 
 - **SRTM Elevation**: [NASA SRTM](https://www2.jpl.nasa.gov/srtm/)
+- **Public SRTM Mirror**: [AWS elevation-tiles (Mapzen)](https://registry.opendata.aws/terrain-tiles/)
 - **Blue Marble Imagery**: [NASA Blue Marble](https://visibleearth.nasa.gov/collection/1484/blue-marble)
 
 ## Data Sizes (Approximate)
@@ -177,6 +198,14 @@ Biomes are assigned based on Blue Marble colors, elevation, and latitude:
   - `world_8km`: a few MB
   - `world_4km`: tens of MB
   - `world_2km`: larger still (use only if you need the extra detail)
+- **Full-Earth SRTM cache**: 64,800 tiles total (~1.6TB uncompressed). Expect hundreds of GB on disk if you cache everything.
+
+## Output Size Estimates (Very Rough)
+
+These vary a lot based on compression, terrain complexity, and water/air ratios.
+
+- **Whole Earth @ 1:5000**: ~31k chunks. Typical output in the low single‑digit GB range.
+- **Whole Earth @ 1:1000**: ~780k chunks. Typical output in the tens of GB range.
 
 ## Requirements
 

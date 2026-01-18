@@ -36,6 +36,10 @@ class ColumnConfig:
     ore_enabled: bool = True
     ore_configs: List[OreConfig] = field(default_factory=lambda: list(DEFAULT_ORE_CONFIGS))
 
+    # Rock exposure
+    rock_exposure_enabled: bool = True
+    rock_exposure_slope: int = 3  # Y-level delta to expose rock
+
 
 @dataclass
 class BlockColumn:
@@ -112,6 +116,7 @@ class BlockColumnGenerator:
         z: int,
         surface_y: int,
         biome: BiomeType,
+        slope_y: Optional[int] = None,
         seed: Optional[int] = None
     ) -> BlockColumn:
         """Generate a block column.
@@ -141,6 +146,11 @@ class BlockColumnGenerator:
         bedrock_block = self._get_block_id("Bedrock")
         gravel_block = self._get_block_id("Gravel")
         water_block = self._get_block_id("Water")
+
+        if self.config.rock_exposure_enabled and slope_y is not None:
+            if slope_y >= self.config.rock_exposure_slope:
+                surface_block = stone_block
+                subsurface_block = stone_block
 
         # Special handling for water biomes
         is_water_biome = biome in (BiomeType.OCEAN, BiomeType.RIVER, BiomeType.LAKE)
@@ -208,14 +218,28 @@ class BlockColumnGenerator:
             max_y = min(len(column.blocks) - 1, ore.max_y)
             if min_y > max_y:
                 continue
+            range_y = max(1, max_y - min_y)
+            patch_roll = self._hash_to_unit(column.x, 0, column.z, base_seed, idx + 911)
+            in_patch = patch_roll < ore.patch_chance
+            base_chance = ore.chance * (ore.patch_multiplier if in_patch else ore.single_multiplier)
             for y in range(min_y, max_y + 1):
                 if column.blocks[y] not in replace_ids:
                     continue
+                t = (y - min_y) / range_y
+                if ore.depth_bias == "surface":
+                    depth_weight = t ** ore.bias_power
+                elif ore.depth_bias == "deep":
+                    depth_weight = (1.0 - t) ** ore.bias_power
+                else:
+                    depth_weight = 1.0
                 chance = self._hash_to_unit(column.x, y, column.z, base_seed, idx)
-                if chance >= ore.chance:
+                if chance >= base_chance * depth_weight:
                     continue
-                size_roll = self._hash_to_unit(column.x, y, column.z, base_seed, idx + 101)
-                vein = ore.vein_min + int(size_roll * (ore.vein_max - ore.vein_min + 1))
+                if in_patch:
+                    size_roll = self._hash_to_unit(column.x, y, column.z, base_seed, idx + 101)
+                    vein = ore.vein_min + int(size_roll * (ore.vein_max - ore.vein_min + 1))
+                else:
+                    vein = 1
                 offsets = [0]
                 for step in range(1, vein):
                     offsets.append(step if step % 2 else -step)

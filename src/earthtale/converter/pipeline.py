@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Optional, List, Callable, Any, Dict, Tuple
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from collections import deque
+from queue import Queue, Empty
+import asyncio
+import threading
+import time
 
 from ..config import ConversionConfig, BoundingBox
 from ..nasa import (
@@ -86,6 +91,7 @@ class ConversionPipeline:
         self._blue_marble_downloader = BlueMarbleDownloader(self.config.cache_dir / "blue_marble")
         self._blue_marble_pixels = None
         self._blue_marble_size = None
+        self._blue_marble_ready = threading.Event()
 
         # Initialize mappers
         self._elevation_mapper = ElevationMapper(ElevationConfig(
@@ -104,15 +110,27 @@ class ConversionPipeline:
     def _init_blue_marble(self, progress_callback: Optional[ProgressCallback] = None) -> None:
         """Load Blue Marble imagery for biome classification."""
         if not self.config.use_blue_marble or Image is None:
+            self._blue_marble_ready.set()
             return
         if progress_callback:
             progress_callback(ConversionProgress("blue_marble", 0, 1, "Loading Blue Marble imagery..."))
         path = None
         if not self.config.skip_download:
             import asyncio
+            def on_download(progress) -> None:
+                if progress.error and progress_callback:
+                    progress_callback(
+                        ConversionProgress(
+                            "blue_marble",
+                            0,
+                            1,
+                            f"Blue Marble download error: {progress.error}",
+                        )
+                    )
             path = asyncio.run(
                 self._blue_marble_downloader.download_image(
-                    resolution=self.config.blue_marble_resolution
+                    resolution=self.config.blue_marble_resolution,
+                    progress_callback=on_download,
                 )
             )
         if path is None:
@@ -121,12 +139,23 @@ class ConversionPipeline:
             if candidate.exists():
                 path = candidate
         if path is None:
+            if progress_callback:
+                progress_callback(
+                    ConversionProgress(
+                        "blue_marble",
+                        1,
+                        1,
+                        "Blue Marble not available; continuing without imagery",
+                    )
+                )
+            self._blue_marble_ready.set()
             return
         image = Image.open(path).convert("RGB")
         self._blue_marble_pixels = image.load()
         self._blue_marble_size = image.size
         if progress_callback:
             progress_callback(ConversionProgress("blue_marble", 1, 1, "Blue Marble imagery ready"))
+        self._blue_marble_ready.set()
 
     def _get_color_at_lat_lon(self, lat: float, lon: float) -> Optional[tuple[int, int, int]]:
         """Sample Blue Marble image for a lat/lon."""
@@ -233,6 +262,14 @@ class ConversionPipeline:
                 # Clamp to valid range
                 surface_y = max(1, min(WORLD_HEIGHT - 1, surface_y))
 
+                # Estimate slope in Y by sampling neighbors
+                neighbor_offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
+                max_slope = 0
+                for dx, dz in neighbor_offsets:
+                    neighbor_elev = self._get_elevation_at_block(block_x + dx, block_z + dz)
+                    neighbor_y = self._elevation_mapper.get_y(neighbor_elev)
+                    max_slope = max(max_slope, abs(neighbor_y - surface_y))
+
                 # Get latitude for biome calculation
                 lat, lon = block_to_lat_lon(
                     block_x, block_z,
@@ -258,6 +295,7 @@ class ConversionPipeline:
                     z=block_z,
                     surface_y=surface_y,
                     biome=biome,
+                    slope_y=max_slope,
                     seed=self.config.seed
                 )
 
@@ -308,27 +346,98 @@ class ConversionPipeline:
         # Phase 1: Download SRTM data
         report_progress("download", 0, 1, "Checking required SRTM tiles...")
         required_tiles = self._get_required_tiles()
-        missing_tiles = self._downloader.get_missing_tiles(
-            self.config.bounds.min_lat,
-            self.config.bounds.max_lat,
-            self.config.bounds.min_lon,
-            self.config.bounds.max_lon,
+        missing_tiles = [tile for tile in required_tiles if not self._downloader.is_tile_available(tile)]
+        tile_queue: Queue[Optional[str]] = Queue()
+        download_done = threading.Event()
+        download_error: list[Optional[BaseException]] = [None]
+        download_cache_bytes = (
+            int(self.config.download_cache_mb) * 1024 * 1024
+            if self.config.download_cache_mb
+            else 0
         )
+
+        def cache_size_bytes() -> int:
+            total = 0
+            for path in (self.config.cache_dir / "srtm").glob("*.hgt"):
+                try:
+                    total += path.stat().st_size
+                except FileNotFoundError:
+                    continue
+            return total
 
         if missing_tiles and not self.config.skip_download:
             report_progress("download", 0, len(missing_tiles), f"Downloading {len(missing_tiles)} tiles...")
-            self._downloader.download_region(
-                self.config.bounds.min_lat,
-                self.config.bounds.max_lat,
-                self.config.bounds.min_lon,
-                self.config.bounds.max_lon,
-            )
-            report_progress("download", len(missing_tiles), len(missing_tiles), "Download complete")
-        else:
-            report_progress("download", 1, 1, f"All {len(required_tiles)} tiles available")
 
-        # Phase 1b: Load Blue Marble imagery (optional)
-        self._init_blue_marble(progress_callback)
+            def download_worker() -> None:
+                start_times = {}
+                completed = 0
+                lock = threading.Lock()
+                failures: list[str] = []
+
+                def on_progress(progress) -> None:
+                    nonlocal completed
+                    if progress.filename not in start_times:
+                        start_times[progress.filename] = time.perf_counter()
+                    if progress.error:
+                        tile_name = progress.filename.split(".", 1)[0]
+                        with lock:
+                            failures.append(f"{tile_name}: {progress.error}")
+                            report_progress(
+                                "download",
+                                completed,
+                                len(missing_tiles),
+                                f"Tile {tile_name} failed: {progress.error}",
+                            )
+                    if progress.complete and not progress.error:
+                        tile_name = progress.filename.split(".", 1)[0]
+                        tile_queue.put(tile_name)
+                        elapsed = time.perf_counter() - start_times.get(progress.filename, time.perf_counter())
+                        with lock:
+                            completed += 1
+                            if completed == 1:
+                                report_progress(
+                                    "download",
+                                    completed,
+                                    len(missing_tiles),
+                                    f"Tile {tile_name} downloaded in {elapsed:.2f}s",
+                                )
+                            if completed % 10 == 0 or completed == len(missing_tiles):
+                                report_progress(
+                                    "download",
+                                    completed,
+                                    len(missing_tiles),
+                                    f"Downloaded {completed}/{len(missing_tiles)} tiles",
+                                )
+
+                try:
+                    async def download_all() -> None:
+                        for tile in missing_tiles:
+                            if download_cache_bytes:
+                                while cache_size_bytes() >= download_cache_bytes:
+                                    await asyncio.sleep(0.25)
+                            await self._downloader.download_tile(tile, progress_callback=on_progress)
+                            if (
+                                not self._downloader.is_tile_cached(tile)
+                                and self._downloader.is_tile_available(tile)
+                            ):
+                                tile_queue.put(tile)
+
+                    asyncio.run(download_all())
+                    if failures:
+                        raise RuntimeError("SRTM download failed: " + "; ".join(failures))
+                except BaseException as exc:
+                    download_error[0] = exc
+                finally:
+                    download_done.set()
+                    tile_queue.put(None)
+
+            threading.Thread(target=download_worker, daemon=True).start()
+        else:
+            if missing_tiles and self.config.skip_download:
+                report_progress("download", 0, len(missing_tiles), f"Skipping download; {len(missing_tiles)} tiles missing")
+            else:
+                report_progress("download", 1, 1, f"All {len(required_tiles)} tiles available")
+            download_done.set()
 
         # Phase 2: Calculate world dimensions
         report_progress("calculate", 0, 1, "Calculating world dimensions...")
@@ -337,12 +446,24 @@ class ConversionPipeline:
         report_progress("calculate", 1, 1,
                        f"World size: {width_chunks}x{height_chunks} chunks ({width_blocks}x{height_blocks} blocks)")
 
+        # Phase 1b: Load Blue Marble imagery (optional)
+        if self.config.use_blue_marble and Image is not None:
+            if total_chunks <= 4096:
+                self._init_blue_marble(progress_callback)
+            else:
+                threading.Thread(
+                    target=self._init_blue_marble,
+                    args=(progress_callback,),
+                    daemon=True,
+                ).start()
+
         # Phase 3: Create world
         report_progress("world", 0, 1, "Creating world structure...")
-        world = World(
-            self.config.name,
-            WorldConfig(seed=self.config.seed or 0)
-        )
+        world_config = WorldConfig(seed=self.config.seed or 0)
+        world_config.world_gen.type = "Void"
+        world_config.world_gen.name = "Void"
+        world_config.save_new_chunks = False
+        world = World(self.config.name, world_config)
 
         # Phase 4: Generate chunks
         report_progress("generate", 0, total_chunks, "Generating terrain...")
@@ -365,26 +486,66 @@ class ConversionPipeline:
                         continue
                 chunk_coords.append((chunk_x, chunk_z))
 
-        if self.config.parallel:
-            workers = self.config.parallel_workers or os.cpu_count() or 1
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(self._generate_chunk, x, z): (x, z) for x, z in chunk_coords}
-                for future in as_completed(futures):
-                    x, z = futures[future]
-                    chunk = future.result()
-                    world.add_chunk(chunk)
-                    chunk_count += 1
-                    report_progress("generate", chunk_count, total_chunks, f"Chunk ({x}, {z})")
-        else:
-            for chunk_x, chunk_z in chunk_coords:
-                chunk = self._generate_chunk(chunk_x, chunk_z)
-                world.add_chunk(chunk)
-                chunk_count += 1
-                report_progress("generate", chunk_count, total_chunks,
-                              f"Chunk ({chunk_x}, {chunk_z})")
+        origin_lat = self.config.bounds.min_lat
+        origin_lon = self.config.bounds.min_lon
+        available_tiles = {tile for tile in required_tiles if self._downloader.is_tile_available(tile)}
+        chunk_requirements = {}
+        tile_to_chunks: Dict[str, list[tuple[int, int]]] = {}
+        tile_remaining = {}
+        pending_chunks = set()
+        ready_queue: deque[tuple[int, int]] = deque()
 
-        # Phase 5: Save world
-        report_progress("save", 0, 1, "Saving world files...")
+        def required_tiles_for_chunk(chunk_x: int, chunk_z: int) -> set[str]:
+            block_x0 = chunk_x * CHUNK_SIZE
+            block_z0 = chunk_z * CHUNK_SIZE
+            block_x1 = block_x0 + CHUNK_SIZE
+            block_z1 = block_z0 + CHUNK_SIZE
+            lat0, lon0 = block_to_lat_lon(block_x0, block_z0, origin_lat, origin_lon, self.config.scale)
+            lat1, lon1 = block_to_lat_lon(block_x1, block_z1, origin_lat, origin_lon, self.config.scale)
+            min_lat = min(lat0, lat1)
+            max_lat = max(lat0, lat1)
+            min_lon = min(lon0, lon1)
+            max_lon = max(lon0, lon1)
+            return set(get_required_tiles(min_lat, max_lat, min_lon, max_lon))
+
+        for chunk_x, chunk_z in chunk_coords:
+            required = required_tiles_for_chunk(chunk_x, chunk_z)
+            chunk_requirements[(chunk_x, chunk_z)] = required
+            pending_chunks.add((chunk_x, chunk_z))
+            for tile in required:
+                tile_to_chunks.setdefault(tile, []).append((chunk_x, chunk_z))
+        for tile, chunks in tile_to_chunks.items():
+            tile_remaining[tile] = len(chunks)
+
+        def enqueue_ready_chunks() -> None:
+            for chunk in list(pending_chunks):
+                if chunk_requirements[chunk].issubset(available_tiles):
+                    pending_chunks.remove(chunk)
+                    ready_queue.append(chunk)
+
+        def enqueue_for_tile(tile: str) -> None:
+            for chunk in tile_to_chunks.get(tile, []):
+                if chunk in pending_chunks and chunk_requirements[chunk].issubset(available_tiles):
+                    pending_chunks.remove(chunk)
+                    ready_queue.append(chunk)
+
+        def release_tiles_for_chunk(chunk: tuple[int, int]) -> None:
+            for tile in chunk_requirements.get(chunk, set()):
+                remaining = tile_remaining.get(tile, 0) - 1
+                tile_remaining[tile] = remaining
+                if remaining <= 0:
+                    tile_path = self.config.cache_dir / "srtm" / f"{tile}.hgt"
+                    try:
+                        tile_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    self._srtm_cache._cache.pop(tile, None)
+
+        enqueue_ready_chunks()
+        download_reported = False
+
+        autosave_every = self.config.autosave_every or 0
+        world_path = self.config.output_dir / self.config.name
         existing_raw_by_region = None
         if self.config.resume and chunks_dir.exists():
             existing_raw_by_region = {}
@@ -393,6 +554,130 @@ class ConversionPipeline:
                 raw = read_region_chunks_raw(path)
                 if raw:
                     existing_raw_by_region[region_key] = raw
+
+        def autosave(force: bool = False) -> None:
+            if autosave_every <= 0 and not force:
+                return
+            if not force and chunk_count % autosave_every != 0:
+                return
+            report_progress("save", 0, 1, "Autosaving world files...")
+            world.save(self.config.output_dir, existing_raw_by_region=existing_raw_by_region)
+            report_progress("save", 1, 1, "Autosave complete")
+
+        try:
+            if self.config.parallel:
+                workers = self.config.parallel_workers or os.cpu_count() or 1
+                max_in_flight = max(1, workers * 2)
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    start_times = {}
+                    futures = {}
+
+                    def submit_ready() -> None:
+                        while ready_queue and len(futures) < max_in_flight:
+                            x, z = ready_queue.popleft()
+                            start_times[(x, z)] = time.perf_counter()
+                            futures[executor.submit(self._generate_chunk, x, z)] = (x, z)
+
+                    while pending_chunks or futures or ready_queue:
+                        while True:
+                            try:
+                                tile = tile_queue.get_nowait()
+                            except Empty:
+                                break
+                            if tile is None:
+                                download_done.set()
+                            else:
+                                available_tiles.add(tile)
+                                enqueue_for_tile(tile)
+
+                        if download_done.is_set() and missing_tiles and not download_reported and not self.config.skip_download:
+                            report_progress("download", len(missing_tiles), len(missing_tiles), "Download complete")
+                            download_reported = True
+
+                        if download_done.is_set() and pending_chunks and not ready_queue and not futures:
+                            for chunk in list(pending_chunks):
+                                pending_chunks.remove(chunk)
+                                ready_queue.append(chunk)
+
+                        submit_ready()
+
+                        if futures:
+                            done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                x, z = futures.pop(future)
+                                chunk = future.result()
+                                world.add_chunk(chunk)
+                                chunk_count += 1
+                                release_tiles_for_chunk((x, z))
+                                elapsed = time.perf_counter() - start_times[(x, z)]
+                                report_progress(
+                                    "generate",
+                                    chunk_count,
+                                    total_chunks,
+                                    f"Chunk ({x}, {z}) done in {elapsed:.2f}s",
+                                )
+                                autosave()
+                        else:
+                            if not pending_chunks:
+                                break
+                            try:
+                                tile = tile_queue.get(timeout=0.1)
+                            except Empty:
+                                continue
+                            if tile is None:
+                                download_done.set()
+                            else:
+                                available_tiles.add(tile)
+                                enqueue_for_tile(tile)
+            else:
+                while pending_chunks or ready_queue:
+                    if download_done.is_set() and missing_tiles and not download_reported and not self.config.skip_download:
+                        report_progress("download", len(missing_tiles), len(missing_tiles), "Download complete")
+                        download_reported = True
+
+                    if ready_queue:
+                        chunk_x, chunk_z = ready_queue.popleft()
+                        start_time = time.perf_counter()
+                        chunk = self._generate_chunk(chunk_x, chunk_z)
+                        world.add_chunk(chunk)
+                        chunk_count += 1
+                        release_tiles_for_chunk((chunk_x, chunk_z))
+                        elapsed = time.perf_counter() - start_time
+                        report_progress(
+                            "generate",
+                            chunk_count,
+                            total_chunks,
+                            f"Chunk ({chunk_x}, {chunk_z}) done in {elapsed:.2f}s",
+                        )
+                        autosave()
+                        continue
+
+                    if download_done.is_set() and pending_chunks:
+                        for chunk in list(pending_chunks):
+                            pending_chunks.remove(chunk)
+                            ready_queue.append(chunk)
+                        continue
+
+                    try:
+                        tile = tile_queue.get(timeout=0.1)
+                    except Empty:
+                        continue
+                    if tile is None:
+                        download_done.set()
+                    else:
+                        available_tiles.add(tile)
+                        enqueue_for_tile(tile)
+        except KeyboardInterrupt:
+            report_progress("save", 0, 1, "Interrupted, saving partial world...")
+            autosave(force=True)
+            report_progress("save", 1, 1, "Partial world saved")
+            return world_path
+
+        if download_error[0] is not None:
+            raise download_error[0]
+
+        # Phase 5: Save world
+        report_progress("save", 0, 1, "Saving world files...")
         world_path = world.save(self.config.output_dir, existing_raw_by_region=existing_raw_by_region)
         report_progress("save", 1, 1, f"World saved to {world_path}")
 

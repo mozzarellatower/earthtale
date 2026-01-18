@@ -109,6 +109,7 @@ class RegionWriter:
             Path to the written file
         """
         filepath = self.output_dir / region.get_filename()
+        tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
 
         # Initialize zstd compressor
         if HAS_ZSTD:
@@ -150,7 +151,7 @@ class RegionWriter:
                 segment_offset += aligned_size // INDEXED_STORAGE_SEGMENT_SIZE
 
         # Build the file
-        with open(filepath, "wb") as f:
+        with open(tmp_path, "wb") as f:
             # Header
             f.write(INDEXED_STORAGE_HEADER)
 
@@ -178,6 +179,7 @@ class RegionWriter:
                         padding = INDEXED_STORAGE_SEGMENT_SIZE - remainder
                         f.write(b"\x00" * padding)
 
+        tmp_path.replace(filepath)
         return filepath
 
 

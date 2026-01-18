@@ -88,12 +88,12 @@ BLOCK_DIRT_DESERT = DEFAULT_REGISTRY.register("Soil_Dirt_Burnt")
 
 # Surface blocks (ID 6-9)
 BLOCK_GRASS = DEFAULT_REGISTRY.register("Soil_Grass")
-BLOCK_SAND = DEFAULT_REGISTRY.register("Soil_Gravel_Sand_White")
+BLOCK_SAND = DEFAULT_REGISTRY.register("Soil_Gravel_Sand")
 BLOCK_GRAVEL = DEFAULT_REGISTRY.register("Soil_Gravel")
 BLOCK_SNOW = DEFAULT_REGISTRY.register("Soil_Snow")
 
 # Special blocks (ID 10-12)
-BLOCK_WATER = DEFAULT_REGISTRY.register("Fluid_Water", is_solid=False, is_transparent=True)
+BLOCK_WATER = DEFAULT_REGISTRY.register("Water_Source", is_solid=False, is_transparent=True)
 BLOCK_ICE = DEFAULT_REGISTRY.register("Rock_Ice_Blue", is_transparent=True)
 BLOCK_BEDROCK = DEFAULT_REGISTRY.register("Rock_Bedrock")
 
@@ -111,12 +111,12 @@ LEGACY_NAME_MAP = {
     "Stone": "Rock_Basalt",
     "Dirt": "Soil_Dirt",
     "Grass": "Soil_Grass",
-    "Sand": "Soil_Gravel_Sand_White",
+    "Sand": "Soil_Gravel_Sand",
     "Gravel": "Soil_Gravel",
-    "Water": "Fluid_Water",
+    "Water": "Water_Source",
     "Snow": "Soil_Snow",
     "Ice": "Rock_Ice_Blue",
-    "Sandstone": "Rock_Marble",
+    "Sandstone": "Rock_Sandstone",
     "Clay": "Soil_Clay",
     "Bedrock": "Rock_Bedrock",
 }

@@ -84,6 +84,8 @@ class ConversionConfig:
     parallel: bool = False
     parallel_workers: Optional[int] = None
     resume: bool = False
+    download_cache_mb: Optional[int] = None
+    autosave_every: int = 25
 
     # Blue Marble imagery (optional, for biome classification)
     use_blue_marble: bool = True
@@ -107,6 +109,10 @@ class ConversionConfig:
             raise ValueError(f"vertical_exaggeration must be positive: {self.vertical_exaggeration}")
         if self.parallel_workers is not None and self.parallel_workers <= 0:
             raise ValueError(f"parallel_workers must be positive: {self.parallel_workers}")
+        if self.download_cache_mb is not None and self.download_cache_mb <= 0:
+            raise ValueError(f"download_cache_mb must be positive: {self.download_cache_mb}")
+        if self.autosave_every < 0:
+            raise ValueError(f"autosave_every must be >= 0: {self.autosave_every}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""

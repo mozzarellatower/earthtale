@@ -11,6 +11,7 @@ universe/worlds/{name}/
 import json
 import uuid
 import base64
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
@@ -146,14 +147,22 @@ class World:
         self.name = name
         self.config = config or WorldConfig()
         self.chunks: Dict[tuple, Chunk] = {}
+        self._lock = threading.Lock()
 
     def add_chunk(self, chunk: Chunk) -> None:
         """Add a chunk to the world."""
-        self.chunks[(chunk.x, chunk.z)] = chunk
+        with self._lock:
+            self.chunks[(chunk.x, chunk.z)] = chunk
 
     def get_chunk(self, x: int, z: int) -> Optional[Chunk]:
         """Get a chunk by coordinates."""
-        return self.chunks.get((x, z))
+        with self._lock:
+            return self.chunks.get((x, z))
+
+    def _snapshot_chunks(self) -> Dict[tuple, Chunk]:
+        """Copy chunk map for safe serialization."""
+        with self._lock:
+            return dict(self.chunks)
 
     def save(
         self,
@@ -194,9 +203,10 @@ class World:
             json.dump(time_data, f, indent=2)
 
         # Write region files
-        if self.chunks:
+        snapshot = self._snapshot_chunks()
+        if snapshot:
             write_regions(
-                list(self.chunks.values()),
+                list(snapshot.values()),
                 chunks_dir,
                 block_migration_version,
                 existing_raw_by_region=existing_raw_by_region,

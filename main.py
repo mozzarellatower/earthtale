@@ -16,6 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Optional
+import os
 
 # Add src to path so we can import without installing
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -47,6 +48,10 @@ def run_conversion(
     parallel: bool = False,
     workers: Optional[int] = None,
     resume: bool = False,
+    nasa_username: Optional[str] = None,
+    nasa_password: Optional[str] = None,
+    download_cache_mb: Optional[int] = None,
+    autosave_every: int = 25,
 ):
     """Generate a Hytale world using SRTM + Blue Marble data."""
     from earthtale.config import ConversionConfig, BoundingBox
@@ -73,9 +78,22 @@ def run_conversion(
         parallel=parallel,
         parallel_workers=workers,
         resume=resume,
+        nasa_username=nasa_username,
+        nasa_password=nasa_password,
+        download_cache_mb=download_cache_mb,
+        autosave_every=autosave_every,
     )
     pipeline = ConversionPipeline(config)
-    return pipeline.run()
+    def progress_callback(progress):
+        if progress.phase == "generate":
+            if progress.current == 1 or progress.current % 10 == 0 or progress.current == progress.total:
+                print(f"[generate] {progress.current}/{progress.total} {progress.message}", flush=True)
+        elif progress.message:
+            print(f"[{progress.phase}] {progress.message}", flush=True)
+        else:
+            print(f"[{progress.phase}] {progress.current}/{progress.total}", flush=True)
+
+    return pipeline.run(progress_callback)
 
 
 def interactive_mode():
@@ -184,6 +202,10 @@ def main():
         )
         parser.add_argument("--resume", action="store_true", help="Resume generation if output exists")
         parser.add_argument("--small", action="store_true", help="Generate a 1x1 chunk test world")
+        parser.add_argument("--nasa-user", help="NASA Earthdata username")
+        parser.add_argument("--nasa-pass", help="NASA Earthdata password")
+        parser.add_argument("--download-cache-mb", type=int, help="Max SRTM cache size before pausing downloads")
+        parser.add_argument("--autosave-every", type=int, default=25, help="Autosave every N chunks (0 disables)")
         args = parser.parse_args()
 
         bounds = None
@@ -224,6 +246,10 @@ def main():
         workers = args.workers
         resume = args.resume
         small_mode = args.small
+        nasa_username = args.nasa_user or os.getenv("EARTHDATA_USER") or os.getenv("NASA_USERNAME")
+        nasa_password = args.nasa_pass or os.getenv("EARTHDATA_PASS") or os.getenv("NASA_PASSWORD")
+        download_cache_mb = args.download_cache_mb
+        autosave_every = args.autosave_every
 
     print()
     max_chunks = 1 if small_mode else 0
@@ -241,6 +267,10 @@ def main():
         parallel=parallel,
         workers=workers,
         resume=resume,
+        nasa_username=nasa_username,
+        nasa_password=nasa_password,
+        download_cache_mb=download_cache_mb,
+        autosave_every=autosave_every,
     )
 
 

@@ -201,6 +201,8 @@ class SRTMParser:
 
         # Detect resolution
         file_size = filepath.stat().st_size
+        if file_size == 0:
+            raise ValueError(f"Empty SRTM file: {filepath}")
         resolution = self.detect_resolution(file_size)
         side = resolution + 1
 
@@ -258,9 +260,18 @@ class SRTMCache:
         if not filepath.exists():
             return None
 
-        tile = self._parser.parse(filepath)
-        self._cache[tile_name] = tile
-        return tile
+        try:
+            tile = self._parser.parse(filepath)
+        except Exception:
+            # Corrupt or partial file; remove so it can be re-downloaded.
+            try:
+                filepath.unlink()
+            except FileNotFoundError:
+                pass
+            return None
+        else:
+            self._cache[tile_name] = tile
+            return tile
 
     def get_elevation(self, lat: float, lon: float, interpolate: bool = True) -> Optional[float]:
         """Get elevation at a coordinate.
