@@ -230,8 +230,30 @@ class ConversionPipeline:
         # Get elevation from SRTM
         elevation = self._srtm_cache.get_elevation(lat, lon)
         if elevation is None:
-            return 0.0  # Default to sea level if no data
+            return self._estimate_missing_elevation(lat, lon)
         return elevation
+
+    def _estimate_missing_elevation(self, lat: float, lon: float) -> float:
+        """Estimate elevation for missing tiles by sampling neighbors + noise."""
+        samples = []
+        offsets = (
+            (0.0, 0.25),
+            (0.0, -0.25),
+            (0.25, 0.0),
+            (-0.25, 0.0),
+            (0.25, 0.25),
+            (-0.25, -0.25),
+        )
+        for dlat, dlon in offsets:
+            elev = self._srtm_cache.get_elevation(lat + dlat, lon + dlon)
+            if elev is not None:
+                samples.append(elev)
+        if samples:
+            return sum(samples) / len(samples)
+        # Deterministic gentle noise when no neighbors are available.
+        seed = int((lat + 90.0) * 1000) ^ (int((lon + 180.0) * 1000) << 1)
+        noise = ((seed * 2654435761) & 0xFFFFFFFF) / 0xFFFFFFFF
+        return (noise - 0.5) * 10.0
 
     def _generate_chunk(
         self,
@@ -346,7 +368,13 @@ class ConversionPipeline:
         # Phase 1: Download SRTM data
         report_progress("download", 0, 1, "Checking required SRTM tiles...")
         required_tiles = self._get_required_tiles()
+        self._downloader.mark_unavailable_tiles(required_tiles)
         missing_tiles = [tile for tile in required_tiles if not self._downloader.is_tile_available(tile)]
+        def tile_sort_key(name: str) -> tuple[int, int]:
+            lat = int(name[1:3]) * (1 if name[0] == "N" else -1)
+            lon = int(name[4:7]) * (1 if name[3] == "E" else -1)
+            return (-lat, lon)
+        missing_tiles.sort(key=tile_sort_key)
         tile_queue: Queue[Optional[str]] = Queue()
         download_done = threading.Event()
         download_error: list[Optional[BaseException]] = [None]
@@ -355,6 +383,7 @@ class ConversionPipeline:
             if self.config.download_cache_mb
             else 0
         )
+        generation_started = threading.Event()
 
         def cache_size_bytes() -> int:
             total = 0
@@ -373,11 +402,20 @@ class ConversionPipeline:
                 completed = 0
                 lock = threading.Lock()
                 failures: list[str] = []
+                started: set[str] = set()
 
                 def on_progress(progress) -> None:
                     nonlocal completed
                     if progress.filename not in start_times:
                         start_times[progress.filename] = time.perf_counter()
+                    if progress.downloaded_bytes > 0 and progress.filename not in started:
+                        started.add(progress.filename)
+                        report_progress(
+                            "download",
+                            completed,
+                            len(missing_tiles),
+                            f"Downloading {progress.filename}...",
+                        )
                     if progress.error:
                         tile_name = progress.filename.split(".", 1)[0]
                         with lock:
@@ -411,16 +449,23 @@ class ConversionPipeline:
 
                 try:
                     async def download_all() -> None:
-                        for tile in missing_tiles:
-                            if download_cache_bytes:
-                                while cache_size_bytes() >= download_cache_bytes:
-                                    await asyncio.sleep(0.25)
-                            await self._downloader.download_tile(tile, progress_callback=on_progress)
-                            if (
-                                not self._downloader.is_tile_cached(tile)
-                                and self._downloader.is_tile_available(tile)
-                            ):
-                                tile_queue.put(tile)
+                        semaphore = asyncio.Semaphore(self.config.download_concurrency)
+
+                        async def download_one(tile: str) -> None:
+                            async with semaphore:
+                                if download_cache_bytes:
+                                    while cache_size_bytes() >= download_cache_bytes and generation_started.is_set():
+                                        await asyncio.sleep(0.25)
+                                await self._downloader.download_tile(tile, progress_callback=on_progress)
+                                if (
+                                    not self._downloader.is_tile_cached(tile)
+                                    and self._downloader.is_tile_available(tile)
+                                ):
+                                    tile_queue.put(tile)
+
+                        tasks = [asyncio.create_task(download_one(tile)) for tile in missing_tiles]
+                        for task in tasks:
+                            await task
 
                     asyncio.run(download_all())
                     if failures:
@@ -474,7 +519,7 @@ class ConversionPipeline:
             existing_indexes = self._load_existing_indexes(chunks_dir, width_chunks, height_chunks)
 
         chunk_coords = []
-        for chunk_z in range(height_chunks):
+        for chunk_z in range(height_chunks - 1, -1, -1):
             for chunk_x in range(width_chunks):
                 if self.config.resume:
                     region_key = (chunk_x >> 5, chunk_z >> 5)
@@ -514,6 +559,13 @@ class ConversionPipeline:
             pending_chunks.add((chunk_x, chunk_z))
             for tile in required:
                 tile_to_chunks.setdefault(tile, []).append((chunk_x, chunk_z))
+        # Prefetch tiles for the first chunk to start generation ASAP.
+        first_chunk = (0, height_chunks - 1)
+        first_chunk_tiles = chunk_requirements.get(first_chunk, set())
+        if first_chunk_tiles:
+            prefetch = [t for t in missing_tiles if t in first_chunk_tiles]
+            rest = [t for t in missing_tiles if t not in first_chunk_tiles]
+            missing_tiles = prefetch + rest
         for tile, chunks in tile_to_chunks.items():
             tile_remaining[tile] = len(chunks)
 
@@ -542,6 +594,13 @@ class ConversionPipeline:
                     self._srtm_cache._cache.pop(tile, None)
 
         enqueue_ready_chunks()
+        if progress_callback:
+            report_progress(
+                "generate",
+                0,
+                total_chunks,
+                f"Initial ready chunks: {len(ready_queue)}",
+            )
         download_reported = False
 
         autosave_every = self.config.autosave_every or 0
@@ -608,6 +667,8 @@ class ConversionPipeline:
                                 chunk = future.result()
                                 world.add_chunk(chunk)
                                 chunk_count += 1
+                                if chunk_count == 1:
+                                    generation_started.set()
                                 release_tiles_for_chunk((x, z))
                                 elapsed = time.perf_counter() - start_times[(x, z)]
                                 report_progress(
@@ -641,6 +702,8 @@ class ConversionPipeline:
                         chunk = self._generate_chunk(chunk_x, chunk_z)
                         world.add_chunk(chunk)
                         chunk_count += 1
+                        if chunk_count == 1:
+                            generation_started.set()
                         release_tiles_for_chunk((chunk_x, chunk_z))
                         elapsed = time.perf_counter() - start_time
                         report_progress(

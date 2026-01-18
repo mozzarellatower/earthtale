@@ -51,6 +51,9 @@ class SRTMDownloader:
     # SRTM data URL patterns
     USGS_SRTM_BASE = "https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/"
     PUBLIC_SRTM_BASE = "https://elevation-tiles-prod.s3.amazonaws.com/skadi/"
+    BAILU_BASE = "https://bailu.ch/dem3/"
+    SRTM_MAX_LAT = 60
+    SRTM_MIN_LAT = -56
 
     def __init__(
         self,
@@ -119,6 +122,34 @@ class SRTMDownloader:
             return True
         entry = self._metadata.get("downloads", {}).get(tile_name, {})
         return bool(entry.get("missing"))
+
+    def _parse_tile_lat(self, tile_name: str) -> int:
+        """Parse latitude from an SRTM tile name (e.g., N34W119)."""
+        name = tile_name.upper()
+        if len(name) < 3:
+            raise ValueError(f"Invalid tile name: {tile_name}")
+        sign = 1 if name[0] == "N" else -1
+        return sign * int(name[1:3])
+
+    def mark_unavailable_tiles(self, tile_names: List[str]) -> None:
+        """Mark tiles outside SRTM coverage as unavailable."""
+        changed = False
+        for tile in tile_names:
+            try:
+                lat = self._parse_tile_lat(tile)
+            except Exception:
+                continue
+            if lat > self.SRTM_MAX_LAT or lat < self.SRTM_MIN_LAT:
+                entry = self._metadata.setdefault("downloads", {}).get(tile)
+                if not entry or not entry.get("missing"):
+                    self._metadata["downloads"][tile] = {
+                        "url": "coverage",
+                        "size": 0,
+                        "missing": True,
+                    }
+                    changed = True
+        if changed:
+            self._save_metadata()
 
     def get_missing_tiles(
         self,
@@ -236,15 +267,23 @@ class SRTMDownloader:
         ok, err, unavailable = await download_gzip(public_url)
         if ok:
             return filepath
-        if unavailable:
+
+        # Try bailu.ch fallback (global 3-arcsecond)
+        lat_dir = tile_name[:3]
+        bailu_url = urljoin(self.BAILU_BASE, f"{lat_dir}/{tile_name}.hgt.zip")
+        ok_zip, err_zip = await download_zip(bailu_url)
+        if ok_zip:
+            return filepath
+
+        if unavailable or (err_zip and "HTTP 404" in err_zip):
             self._metadata.setdefault("downloads", {})[tile_name] = {
-                "url": public_url,
+                "url": bailu_url,
                 "size": 0,
                 "missing": True,
             }
             self._save_metadata()
             progress = DownloadProgress(
-                url=public_url,
+                url=bailu_url,
                 filename=tile_name,
                 total_bytes=0,
                 downloaded_bytes=0,
@@ -261,6 +300,14 @@ class SRTMDownloader:
             ok, err = await download_zip(nasa_url)
             if ok:
                 return filepath
+
+        self._metadata.setdefault("downloads", {})[tile_name] = {
+            "url": bailu_url,
+            "size": 0,
+            "missing": True,
+            "error": err or "Download failed",
+        }
+        self._save_metadata()
 
         progress = DownloadProgress(
             url=public_url,

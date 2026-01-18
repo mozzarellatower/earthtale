@@ -52,6 +52,7 @@ def run_conversion(
     nasa_password: Optional[str] = None,
     download_cache_mb: Optional[int] = None,
     autosave_every: int = 25,
+    download_concurrency: int = 4,
 ):
     """Generate a Hytale world using SRTM + Blue Marble data."""
     from earthtale.config import ConversionConfig, BoundingBox
@@ -82,6 +83,7 @@ def run_conversion(
         nasa_password=nasa_password,
         download_cache_mb=download_cache_mb,
         autosave_every=autosave_every,
+        download_concurrency=download_concurrency,
     )
     pipeline = ConversionPipeline(config)
     def progress_callback(progress):
@@ -206,6 +208,7 @@ def main():
         parser.add_argument("--nasa-pass", help="NASA Earthdata password")
         parser.add_argument("--download-cache-mb", type=int, help="Max SRTM cache size before pausing downloads")
         parser.add_argument("--autosave-every", type=int, default=25, help="Autosave every N chunks (0 disables)")
+        parser.add_argument("--download-workers", type=int, default=4, help="Concurrent SRTM downloads")
         args = parser.parse_args()
 
         bounds = None
@@ -250,6 +253,7 @@ def main():
         nasa_password = args.nasa_pass or os.getenv("EARTHDATA_PASS") or os.getenv("NASA_PASSWORD")
         download_cache_mb = args.download_cache_mb
         autosave_every = args.autosave_every
+        download_concurrency = args.download_workers
 
     print()
     max_chunks = 1 if small_mode else 0
@@ -271,6 +275,7 @@ def main():
         nasa_password=nasa_password,
         download_cache_mb=download_cache_mb,
         autosave_every=autosave_every,
+        download_concurrency=download_concurrency,
     )
 
 

@@ -38,7 +38,7 @@ python3 main.py mount_everest --exaggeration 2.0
 
 ## NASA Earthdata Credentials
 
-By default, EarthTale uses a public SRTM mirror (no auth required). Some ocean/polar tiles simply do not exist in SRTM; those are treated as missing and will generate sea-level terrain. If a tile isn't available on the public mirror, you can provide NASA Earthdata credentials as a fallback:
+By default, EarthTale uses public SRTM mirrors (no auth required). It tries the AWS elevation-tiles mirror first, then falls back to the global 90m (3") bailu.ch mirror. Some ocean/polar tiles simply do not exist in SRTM; those are treated as missing and will generate sea-level terrain. If a tile isn't available on the public mirrors, you can provide NASA Earthdata credentials as a fallback:
 
 ```bash
 python3 main.py grand_canyon --nasa-user YOUR_USER --nasa-pass YOUR_PASS

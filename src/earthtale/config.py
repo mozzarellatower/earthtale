@@ -86,6 +86,7 @@ class ConversionConfig:
     resume: bool = False
     download_cache_mb: Optional[int] = None
     autosave_every: int = 25
+    download_concurrency: int = 4
 
     # Blue Marble imagery (optional, for biome classification)
     use_blue_marble: bool = True
@@ -113,6 +114,8 @@ class ConversionConfig:
             raise ValueError(f"download_cache_mb must be positive: {self.download_cache_mb}")
         if self.autosave_every < 0:
             raise ValueError(f"autosave_every must be >= 0: {self.autosave_every}")
+        if self.download_concurrency <= 0:
+            raise ValueError(f"download_concurrency must be positive: {self.download_concurrency}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
